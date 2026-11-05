@@ -27,6 +27,7 @@ def main():
     net=ActorCritic(pts.n_pts,HISTORY*PROPRIO_DIM,12);net.load_state_dict(ck['model']);net.eval()
     env=BatchedAssemblyEnv(trained,[0],EnvConfig(**{**cfg['env'],'nthread':a.nthread}))
     result={'policy':str(Path(a.policy).resolve()),'distribution':'independent loose table',
+            'evaluation_backend':'native canonical geometry','training_backend':cfg.get('physics_backend','native'),
             'model_signature':signature(),'bank_directory_signature':directory_signature(a.bank_dir),'tasks':{}}
     torch.manual_seed(501)
     try:

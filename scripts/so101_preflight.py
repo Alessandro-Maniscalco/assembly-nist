@@ -23,9 +23,12 @@ def main():
     ap.add_argument('--out',type=Path,default=ROOT/'artifacts_local/preflight.json')
     ap.add_argument('--max-contact-depth',type=float,default=None)
     ap.add_argument('--stability',choices=['velocity','pose'],default='velocity')
+    ap.add_argument('--physics',choices=['native','whole_helper_sdf'],default='native')
+    ap.add_argument('--physics-model',type=Path)
     a=ap.parse_args();bank=a.bank_dir;check_bank(bank)
     result={'model_signature':signature(),'bank_directory_signature':directory_signature(bank),
             'bank_dir':str(bank.resolve()),'max_contact_depth':a.max_contact_depth,'stability_metric':a.stability,'checks':{}}
+    result['physics_backend']=a.physics;result['physics_signature']=result['model_signature']
     def check(name,condition):
         result['checks'][name]=bool(condition)
         if not condition:raise AssertionError(name)
@@ -42,7 +45,16 @@ def main():
                     for f in n.body if isinstance(f,ast.FunctionDef) and f.name=='update')
     check('ppo_update_unchanged',ast.dump(update(subprocess.check_output(['git','show',UPSTREAM+':assembly_policy/train.py'],cwd=ROOT,text=True)))==
           ast.dump(update((ROOT/'assembly_policy/train.py').read_text())))
-    env=BatchedAssemblyEnv(TASK_NAMES,np.arange(5),EnvConfig(nthread=1,max_contact_depth=a.max_contact_depth,stability_metric=a.stability))
+    config=EnvConfig(nthread=1,max_contact_depth=a.max_contact_depth,stability_metric=a.stability)
+    if a.physics=='whole_helper_sdf':
+        if a.physics_model is None or a.max_contact_depth is None:raise ValueError('GPU preflight requires model and depth monitor')
+        from assembly_policy.so101.warp_env import BatchedWarpAssemblyEnv,archived_helper_factory,physics_identity
+        factory=archived_helper_factory(a.physics_model);identity=physics_identity(factory)
+        result['physics_signature']=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+        result['physics_provenance']=identity
+        env=BatchedWarpAssemblyEnv(TASK_NAMES,np.arange(5),config,model_factory=factory,model_variant='whole_helper_sdf',
+                                  proof_dir=a.out.with_suffix(''))
+    else:env=BatchedAssemblyEnv(TASK_NAMES,np.arange(5),config)
     states=[]
     for name in TASK_NAMES:
         tr=np.load(bank/f'{name}_train.npz');ev=np.load(bank/f'{name}_eval.npz')

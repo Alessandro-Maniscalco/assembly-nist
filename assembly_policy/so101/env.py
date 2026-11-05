@@ -57,7 +57,7 @@ def resolve_tasks(value):
 
 
 class BatchedAssemblyEnv:
-    def __init__(self, task_names, task_of_env, ecfg=None):
+    def __init__(self, task_names, task_of_env, ecfg=None, *, model_factory=None):
         self.ecfg = ecfg or EnvConfig()
         if self.ecfg.stability_metric not in ('velocity','pose'):raise ValueError('Unknown stability metric')
         if self.ecfg.max_contact_depth is not None and self.ecfg.max_contact_depth<=0:
@@ -65,7 +65,7 @@ class BatchedAssemblyEnv:
         self.task_names = list(task_names)
         self.task = np.array(task_of_env, dtype=np.int64)
         self.N = len(self.task)
-        self.m = model(contact_monitor=self.ecfg.max_contact_depth is not None)
+        self.m = (model_factory or model)(contact_monitor=self.ecfg.max_contact_depth is not None)
         self.data = [mujoco.MjData(self.m) for _ in range(self.N)]
         self.work = [mujoco.MjData(self.m) for _ in range(max(1,self.ecfg.nthread))]
         self.engine = rollout.Rollout(nthread=self.ecfg.nthread if self.ecfg.nthread > 1 else 0)

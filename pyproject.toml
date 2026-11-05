@@ -12,6 +12,7 @@ dependencies = ["mujoco>=3.3", "torch>=2.1", "numpy", "scipy", "imageio[ffmpeg]"
 
 [project.optional-dependencies]
 so101 = ["mujoco==3.17.0", "rhino3dm==8.35.0", "trimesh==5.2.0", "open3d==0.20.0", "libigl==2.6.3", "psutil>=5.9"]
+so101-gpu = ["mujoco-warp==3.17.0", "warp-lang==1.19.0"]
 
 [tool.setuptools.packages.find]
 include = ["assembly_policy*"]

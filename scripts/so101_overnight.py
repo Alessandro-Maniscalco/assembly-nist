@@ -62,6 +62,8 @@ def main():
     ap.add_argument('--preflight',type=Path,default=ROOT/'artifacts_local/preflight.json')
     ap.add_argument('--max-contact-depth',type=float,default=None)
     ap.add_argument('--stability',choices=['velocity','pose'],default='velocity')
+    ap.add_argument('--physics',choices=['native','whole_helper_sdf'],default='native')
+    ap.add_argument('--physics-model',type=Path)
     ap.add_argument('--review-seconds',type=int,default=7200)
     ap.add_argument('--first-review-utc',help='Optional first review ISO8601 time; subsequent reviews use --review-seconds')
     ap.add_argument('--sampler-floor-mass',type=float,default=1.6,
@@ -77,16 +79,26 @@ def main():
                    for name in ('motor','horn','screw','retainer','yoke'))
     eps_q=a.sampler_floor_mass/bank_count
     preflight=json.loads(a.preflight.read_text())
+    physics_signature=signature()
+    if a.physics=='whole_helper_sdf':
+        import hashlib
+        from assembly_policy.so101.warp_env import archived_helper_factory,physics_identity
+        if a.physics_model is None:raise ValueError('GPU run requires qualified model archive')
+        physics_signature=hashlib.sha256(json.dumps(physics_identity(archived_helper_factory(a.physics_model)),sort_keys=True).encode()).hexdigest()
     if (preflight['model_signature']!=signature() or not all(preflight['checks'].values()) or
         preflight.get('bank_directory_signature')!=directory_signature(a.bank_dir) or
         preflight.get('max_contact_depth')!=a.max_contact_depth or
-        preflight.get('stability_metric','velocity')!=a.stability):
+        preflight.get('stability_metric','velocity')!=a.stability or
+        preflight.get('physics_backend','native')!=a.physics or
+        preflight.get('physics_signature',preflight['model_signature'])!=physics_signature):
         raise ValueError('A passing preflight for the current model and exact bank is required')
     environment={**os.environ,'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','MUJOCO_GL':'egl'}
-    process=None;restarts=0;reviews=0
+    process=None;restarts=0
+    reviews=max((int(p.name) for p in (run/'reviews').glob('*') if p.is_dir() and p.name.isdigit()),default=0)
     next_review=datetime.fromisoformat(a.first_review_utc).timestamp() if a.first_review_utc else time.time()+a.review_seconds
     status={'supervisor_pid':os.getpid(),'run_dir':str(run),'end_utc':a.end_utc,
-            'model_signature':signature(),'backend':'native_cpu_physics_cuda_ppo','state':'starting'}
+            'model_signature':signature(),'backend':a.physics+'_physics_cuda_ppo','state':'starting'}
+    status['physics_signature']=physics_signature
     status['bank_dir']=str(a.bank_dir.resolve())
     status['bank_directory_signature']=directory_signature(a.bank_dir)
     status.update(bank_entries=bank_count,sampler_eps_q=eps_q,sampler_floor_mass=a.sampler_floor_mass)
@@ -119,6 +131,8 @@ def main():
                 if a.init_policy:command+=['--init-policy',str(a.init_policy.resolve())]
                 command+=['--so101-stability',a.stability]
                 if a.max_contact_depth is not None:command+=['--so101-max-contact-depth',str(a.max_contact_depth)]
+                command+=['--so101-physics',a.physics]
+                if a.physics_model:command+=['--so101-physics-model',str(a.physics_model.resolve())]
                 log=(run/f'trainer_attempt_{restarts}.log').open('a')
                 process=subprocess.Popen(command,cwd=ROOT,env=environment,stdin=subprocess.DEVNULL,
                                          stdout=log,stderr=subprocess.STDOUT,start_new_session=True)

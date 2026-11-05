@@ -11,6 +11,8 @@ python -m assembly_policy.train --run-dir runs/e8192 --remote-workers 960       
 from __future__ import annotations
 
 import argparse
+import hashlib
+from functools import partial
 import dataclasses
 import json
 import os
@@ -40,6 +42,8 @@ def parse(argv=None):
     ap.add_argument("--suite", choices=["nist", "so101"], default="nist")
     ap.add_argument("--so101-max-contact-depth",type=float,default=None)
     ap.add_argument("--so101-stability",choices=['velocity','pose'],default='velocity')
+    ap.add_argument("--so101-physics",choices=['native','whole_helper_sdf'],default='native')
+    ap.add_argument("--so101-physics-model",help='Qualified sensor-equipped helper-SDF MJB for the optional GPU backend')
     ap.add_argument("--tasks", default="all20", help="all20 (default), or a task set / '+'-separated list")
     ap.add_argument("--bank-dir", default=str(BANK_DIR))
     ap.add_argument("--envs", type=int, default=8192)
@@ -143,11 +147,28 @@ class Trainer:
         extra={} if self.backend is None else dict(max_contact_depth=a.so101_max_contact_depth,stability_metric=a.so101_stability)
         self.ecfg = config_type(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=scales(a.action_scale_joints),**extra)
         self.args = dict(vars(a), env={k: v for k, v in dataclasses.asdict(self.ecfg).items() if k != "nthread"})
+        env_type=None if self.backend is None else self.backend.BatchedAssemblyEnv
+        physics_provenance=None
         if self.backend:
             from .so101.resets import signature, pooled_signature
             self.args['model_signature'] = signature()
             self.args['bank_signature']=pooled_signature((self.bank_S,self.bank_T,self.bank_F))
+            self.args['physics_backend']=a.so101_physics
+            self.args['physics_signature']=self.args['model_signature']
+            if a.so101_physics=='whole_helper_sdf':
+                if a.remote_workers:raise ValueError('The qualified GPU backend currently requires local collection')
+                if not a.so101_physics_model or a.so101_max_contact_depth is None:
+                    raise ValueError('GPU physics requires a qualified model archive and contact-depth monitoring')
+                from .so101.warp_env import BatchedWarpAssemblyEnv, archived_helper_factory, physics_identity
+                factory=archived_helper_factory(a.so101_physics_model)
+                identity=physics_identity(factory)
+                self.args['physics_signature']=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+                physics_provenance=identity
+                env_type=partial(BatchedWarpAssemblyEnv,model_factory=factory,model_variant='whole_helper_sdf',
+                                 proof_dir=self.run/'physics')
         self._maybe_resume()
+        if physics_provenance is not None:
+            (self.run/'physics_provenance.json').write_text(json.dumps(physics_provenance,indent=2)+'\n')
         (self.run / "config.json").write_text(json.dumps(self.args, indent=1))
         horizon = int(round(self.ecfg.horizon_s / self.ecfg.control_dt))
         t0 = np.random.default_rng(a.seed + 7).integers(0, horizon, a.envs)   # desynchronized episode clocks
@@ -165,7 +186,7 @@ class Trainer:
                                     n_keys=len(self.tasks) * len(FAMILIES))
         else:
             self.env = LocalVecEnv(self.tasks, a.envs, self.ecfg, self._provider, t0,
-                                  env_type=None if self.backend is None else self.backend.BatchedAssemblyEnv)
+                                  env_type=env_type)
 
     # ------------------------------------------------------------- helpers
     def _provider(self, k, finished=None, outcomes=None):
@@ -219,20 +240,28 @@ class Trainer:
                 if self.backend.resolve_tasks(d['args']['tasks'])!=self.tasks:
                     raise ValueError('Warm-start task order differs')
                 self.model.load_state_dict(d['model']);self.model.project_()
+                with Path(initial).open('rb') as source:
+                    parent_hash=hashlib.sha256(source.read()).hexdigest()
                 self.args['parent_policy']={'path':str(Path(initial).resolve()),'iteration':d.get('it'),
-                                            'transitions':d.get('transitions'),'optimizer_reused':False,'sampler_reused':False}
+                                            'transitions':d.get('transitions'),'sha256':parent_hash,
+                                            'physics_backend':d['args'].get('physics_backend','native'),
+                                            'optimizer_reused':False,'sampler_reused':False}
                 print('[train] weights-only continuation; fresh optimizer and SGS',flush=True)
             return
         d = torch.load(p, map_location=self.dev, weights_only=False)
         if self.backend and (d.get('args', {}).get('model_signature') != self.args['model_signature'] or
                              d.get('args', {}).get('bank_signature') != self.args['bank_signature'] or
+                             d['args'].get('physics_backend','native') != self.args['physics_backend'] or
+                             d['args'].get('physics_signature',d['args']['model_signature']) != self.args['physics_signature'] or
                              self.backend.resolve_tasks(d['args']['tasks']) != self.tasks or
                              self.backend.EnvConfig(**{**d['args']['env'],'nthread':self.ecfg.nthread})!=self.ecfg):
-            raise ValueError('SO101 checkpoint assets/reset bank/task order/environment differ; start a separate run directory')
+            raise ValueError('SO101 checkpoint assets/reset bank/task order/environment/backend differ; start a separate run directory')
         self.model.load_state_dict(d["model"])
         self.opt.load_state_dict(d["opt"])
         self.model.project_()
         self.lr, self.it, self.transitions = d["lr"], d["it"], d["transitions"]
+        if 'parent_policy' in d.get('args',{}):
+            self.args['parent_policy']=d['args']['parent_policy']
         sp = self.run / "sampler.pt"
         if sp.exists():
             st = torch.load(sp, weights_only=False)

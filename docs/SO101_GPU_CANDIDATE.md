@@ -1,8 +1,8 @@
 # Isolated GPU collision candidate
 
-**Goal:** Measure a faster helper-jaw collision candidate without changing the frozen native-physics overnight pilot or original PPO/SimBa/SGS.
+**Goal:** Qualify isolated GPU collision variants while preserving native reference evidence and the original PPO/SimBa/SGS.
 
-**Status, 2026-11-05: not qualified for training.** The pinned Menagerie jaw collisions remove the previous first-step stall, and the nominal contact-operated driver sequence passes on native MuJoCo and MJWarp. Small-part collision fidelity, full-task manipulation/success, and a training adapter remain unqualified. The running pilot and its banks were not changed.
+**Status, 2026-11-05:** Menagerie jaws and the raw-helper-mesh GPU variant remain rejected. The whole-helper SDF variant passes full tool replay and 64-world functional environment checks. Two subsequent PPO pilots stop on solver-iteration exhaustion, including with a 200-iteration cap. Native physics remains the unattended training backend. No result here establishes learned loose-part assembly or hardware transfer.
 
 ## Candidate and explicit deviations
 
@@ -114,3 +114,164 @@ time. This short result motivates further qualification; it does not establish
 end-to-end learner speed or mechanical equivalence. The native v2 learner was
 then started while actual contact/control/reset checks proceed separately.
 Evidence: `artifacts_local/gpu_profile/quiet_mixed/profile.json`.
+
+### Fine-geometry environment qualification: faster, but not ready
+
+`assembly_policy/so101/warp_env.py` provides an isolated optional rollout adapter;
+the production factory and learner do not import it. It reuses the native
+environment's observations, twelve relative joint controls, costs, task success,
+timeouts and safety checks. It calls supported `mjw.reset_data` before each
+control block, restores FULLPHYSICS, and records every fine-step state and contact
+sensor. Raw time must match iterative float32 additions exactly before returning
+the environment's float64 clock. Sensor matching capacity is explicitly 512;
+each sensor value is independently checked against the minimum GPU contact
+distance. GPU line search remains explicitly 100, versus native 20.
+
+The two wrist/jaw exclusions are recomputed from the actual fine geometry, with
+a per-step joint-domain guard. Every compiled numeric model array and all solver
+options are compared against the caller's native model, allowing only those
+exclusions and associated name-table metadata. Runtime mass, timestep,
+integrator and sensor mutations are rejected; an unexpected sensor cannot be
+substituted for the global minimum-distance contact monitor.
+
+At **16 worlds**, 40 control blocks pass all functional checks: ordinary actions,
+observations and outcomes; partial SGS resets and history; two-control timeout;
+held-versus-released motor, horn and retaining-frame completion; independently
+audited eleven-pose stability windows; physical velocity safety; rejection of
+nonfinite inputs and out-of-domain jaws. The six held starts remain nonterminal;
+all ten opening/already-released cases succeed without safety termination. Every
+fine-step sensor audit and raw-clock check passes, with zero overflow. These are
+prepared task starts, not learned loose-part assembly.
+
+| Complete environment collection | Native, 16 threads | Mixed GPU |
+| --- | ---: | ---: |
+| 16 worlds, four timed controls | 15.92 transitions/s | 44.87 transitions/s |
+| 64 worlds, four timed controls | 24.16 transitions/s | 62.21 transitions/s |
+
+Both include endpoint native forwards, observations, rewards and safety under
+concurrent native training; neither includes a PPO update. The 64-world benchmark
+finishes before its later reset-source preparation exceeds the 5 GiB probe RSS
+cap. Preloading those sources before GPU allocation allows the complete 16-world
+suite to finish. These short measurements do not establish sustained learner
+throughput or memory requirements.
+
+Strict repeatability fails separately from reset hygiene. Deliberately
+contaminated forces, acceleration and warm starts are cleared by supported
+`reset_data`; the first repeated fine step differs by at most 6.98e-10 in qpos
+and 3.20e-6 in qvel. Over 80 steps, loose screw contact jitter amplifies this to
+about 0.9 rad/s angular-velocity difference, while part positions differ by at
+most 17.2 µm and outcomes remain equal in the diagnostic. Canonical contact and
+constraint ordering does not remove the jitter. Full invariant-atomic ordering
+fails with a Warp workspace dimension exceeding its signed-32-bit limit. No
+global deterministic workaround is used. A discarded blanket-array-zeroing
+experiment also erased structural Data fields and is explicitly invalid evidence.
+
+The nominal multi-turn thread fit is 0.497451/0.496923 mm per turn for native/GPU,
+against 0.500 mm nominal; both pass the existing 5 µm slope criterion. A 1 N
+axial-only test settles 6.94/6.39 µm. The shorter native thread-fit failure remains
+preserved. Abrupt fine-jaw tool actuation and a separate 0.2 s, 25 Hz ramp retain
+OFF/ON/OFF/drop behavior, but GPU peaks of 0.3081 and 0.3189 mm fail the unchanged
+0.300 mm tool-bench limit.
+
+Most decisively, replaying all **40,601 original twelve-arm control samples**
+without intermediate resets preserves pickup, OFF carry, physical ON activation,
+coast-down and return in four GPU worlds, but produces **6.731 mm penetration**
+during final withdrawal. Earlier stages stay below 0.159 mm. Static queries at
+the saved GPU poses identify false mesh–SDF contacts: right shoulder versus fixed
+jaw (3.210 mm), and right upper arm versus fixed jaw (5.040 mm); native finds no
+contacts for either pair at those same poses. Recorded arm velocity reaches
+26.68 rad/s. These nonadjacent links can potentially collide elsewhere, so they
+have not been excluded. The contact/velocity guards would terminate such a
+training transition, but they do not repair the incorrect contact physics.
+
+**Readiness remains NO-GO** until these mesh–SDF artifacts are resolved and
+requalified. Evidence and the concise handoff are under
+`artifacts_local/warp_env/qualification_summary.json`; the complete functional
+report is `environment16/environment.json`, and failed full-motion evidence is
+`tool_replay/` and `withdrawal_contacts/`. Reproduce with:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -u \
+  -m scripts.check_so101_warp_env --case environment --worlds 16 \
+  --out artifacts_local/warp_env/environment_review
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -u \
+  -m scripts.check_so101_warp_env --case tool_replay --worlds 4 \
+  --out artifacts_local/warp_env/tool_replay_review
+```
+
+
+## Whole-helper SDF variant: tool and environment gates passed
+
+The separate helper-grid candidate replaces all 30 active helper mesh colliders
+with eleven 0.15 mm source-surface SDF grids. Fine jaw grids 201–202, Hiwonder
+surfaces, nominal threads and physical driver remain unchanged. It adds **no
+collision exclusions**. `helper_sdf/handoff.json` records the native geometric
+and physical qualification, including the approximation's limits.
+
+Direct import of archived model `214c2832347e3419dcec76afe92754193fb84d32e589c567b90e89588111c8b3`
+passes the original 40,601-step, 20.3005-second tool replay in **all four GPU
+worlds**, without intermediate resets. Pickup exceeds 40 mm; carry stays OFF;
+physical squeezing activates 25.92 rad/s; release/coast stops the spindle; return,
+release and empty-hand withdrawal pass. Maximum penetration is **0.165900 mm**
+against the unchanged 0.300 mm gate; maximum helper speed is 0.578592 rad/s.
+All contacts are monitored at every fine step, with zero overflow and exact
+repeated-float32 raw clocks. The earlier 6.731 mm mesh–SDF artifact disappears.
+
+The sensor-equipped archive `c69d5fe2201b004004dd60e14de9f684f64e11bf6edc33b8fbdb094a7724753b`
+passes a sensor-only audit of every existing numeric model array, option and
+semantic name. The loader pins its MJB, plugin binaries, helper manifest and all
+18 referenced grid hashes. `archived_helper_factory` plus explicit
+`model_variant='whole_helper_sdf'` imports this model without rebuilding canonical
+XML. Line search remains 100; minimum-contact sensor capacity is 512.
+
+At **64 worlds**, ordinary actions/outcomes, partial reset/history, timeout,
+nonfinite guards, physical velocity safety, all fine-step sensor/clock checks,
+and prepared motor/horn/retainer completion pass. All 24 held controls stay
+nonterminal; all 40 opening/already-released cases succeed without safety failure.
+Sixteen timed controls including observations/rewards measure **66.87 GPU versus
+27.90 native transitions/s** (2.40×) under concurrent native training. This is
+collection throughput, not end-to-end PPO speed. Total GPU usage was about 4.12 GB.
+
+Supported reset-data contamination checks and ordinary five-frame history shifts
+pass. Bitwise repeatability still fails: repeated part positions differ by up to
+12.1 µm, while loose screw angular velocity differs by up to 1.36 rad/s. No
+deterministic workaround is enabled. The older isolated tool bench's 0.308/0.319
+mm depth failures remain preserved; this pass qualifies the actual recorded
+pickup protocol, not arbitrary squeeze trajectories.
+
+Evidence: `artifacts_local/whole_helper_gpu/{replay,model,environment64_r2,reset64}`.
+The first environment attempt's API typo is retained in `environment64.log`;
+the corrected complete run is `environment64_r2`. Reproduce:
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m scripts.check_so101_warp_env \
+  --case tool_replay --worlds 4 --replay artifacts_local/helper_sdf/native_tool_replay \
+  --candidate-mjb artifacts_local/helper_sdf/native_tool_replay.mjb --out artifacts_local/whole_helper_gpu/replay_review
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m scripts.check_so101_warp_env \
+  --case environment --worlds 64 --controls 16 --bank-dir data/so101/banks_near_v2 \
+  --candidate-mjb artifacts_local/whole_helper_gpu/model/candidate_sensor.mjb --out artifacts_local/whole_helper_gpu/environment_review
+```
+
+## Learner integration and preserved convergence failure
+
+Install optional probe dependencies with `pip install -e '.[so101,so101-gpu]'`; the complete toolchain is tested on Python 3.12. Trainer flags `--so101-physics whole_helper_sdf --so101-physics-model PATH.mjb` explicitly select the archived model. Preflight and supervisor use corresponding `--physics` and `--physics-model` flags. Model, plugins, grids, adapter source and runtime versions are pinned separately from the canonical reset-bank signature. Evaluation intentionally uses canonical native physics and records both backends.
+
+Two 64-world, 32-step PPO pilots use the final native v2 weights with fresh optimizer/SGS. Both complete one finite update at about 62 transitions/s, then abort before their next update on `OverflowType.ITERATIONS` (512). Increasing the GPU solver cap from 50 to 200 at unchanged tolerance 1e-8 does not resolve the contact. Line search stays 100, and overflow checks remain enabled. The second failure saves all initial states, controls, fine-step states, sensors and flags in `runs/so101_gpu_v2_20261105/physics/failure_000036.npz`; original logs remain in both pilot directories. This prevents unattended continuation with that 1e-8 GPU runtime despite the narrower functional passes above.
+
+## Explicit float32 solver tolerance and repeated qualification
+
+Only world 54 exhausts the second pilot's solver. An instrumented replay reproduces the failure at its first fine step: iterations 3–200 cycle, with scaled improvement about 6.2–7.4e-7 and scaled Newton model improvement about 2.3–2.5e-7. Increasing the cap further cannot establish convergence in this trace. States remain finite, penetration stays below 0.058 mm, and helper speed stays below 3.01 rad/s. Native physics at 1e-8 needs at most ten iterations across all six constraint islands over the 80-step replay, with no cap hits or warnings. Earlier diagnostic fields reporting three native iterations cover island 0 only; the separate all-island audit preserves that correction.
+
+MJWarp 3.17's installed `io.py:469–472` defaults GPU tolerance to at least **1e-6** for float32 arithmetic. The optional adapter now retains that upstream numerical setting, with solver cap 200, line-search cap 100 and every overflow check enabled. Native physics remains at **1e-8**. This is an explicit numerical deviation, recorded in runtime identity and reports; it does not establish GPU convergence at 1e-8. Replaying the failed world at 1e-6 needs at most seven iterations, produces zero overflow, and differs from native part positions by at most 5.62 µm over 40 ms. It is a single-world comparison, with ordinary GPU nondeterminism still present.
+
+At this setting, the actual 40,601-step tool replay passes all eight physical gates in all four worlds, with maximum penetration **0.152565 mm**. Complete finite state/control archives and the final PASS report were saved; the surrounding shell subsequently reported exit 143 without a watchdog record. That unexplained post-result termination is retained in the handoff. The 64-world environment process exits normally: all 40 opened/released cases complete, all 24 held controls remain nonterminal, and action/history/reset/timeout/contact/velocity/nonfinite checks pass. Strict repeatability remains unqualified. Sixteen five-task controls measure 67.11 GPU versus 26.36 native collection transitions/s under concurrent native training.
+
+A separate matched scaling probe repeats the same 64-state mixture of 32 independent loose starts and 32 prepared TRAIN holds. Each size runs eight measured controls including observations, rewards and terminal/reset handling, excluding actor/PPO updates. All runs exit normally with zero safety events, overflow and sensor-audit error.
+
+| Worlds | Collection transitions/s | Peak process RSS, GiB | Total GPU memory at final sample, MiB |
+| --- | ---: | ---: | ---: |
+| 64 | 51.67 | 4.18 | 4,115 |
+| 128 | 56.02 | 4.61 | 4,531 |
+| 256 | 53.59 | 5.47 | 5,299 |
+
+These short measurements favor 128 worlds only modestly; the orchestrator selected 128 for a fresh actual PPO pilot. They do not establish a learned assembly rate or justify extrapolating throughput to larger batches. Evidence and the unchanged runtime hashes are indexed in `artifacts_local/whole_helper_gpu_tol1e6/handoff.json`. Reproduce the solver case with `scripts/check_so101_gpu_solver.py`; `scripts/check_so101_warp_env.py --case collection` provides the matched scaling probe. Use fresh output directories to preserve the earlier failures.

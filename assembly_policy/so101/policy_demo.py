@@ -83,6 +83,7 @@ def main():
     finally:env.close()
     if not log.states:raise RuntimeError(failure or 'No native steps recorded')
     report=log.save(a.out,dict(scripted=False,learned_policy=True,task=a.task,
+        evaluation_backend='native canonical geometry',training_backend=cfg.get('physics_backend','native'),
         distribution=distribution,split=a.split,entry=a.entry,reset_family=family,reset_seed=seed,
         policy_sha256=hashlib.sha256(policy_bytes).hexdigest(),policy_iteration=ck['it'],
         policy_transitions=ck['transitions'],action_mode=a.action_mode,action_seed=a.seed,
