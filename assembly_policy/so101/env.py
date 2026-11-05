@@ -36,6 +36,7 @@ class EnvConfig:
     stability_metric: str = 'velocity'
     stable_translation: float = .00025
     stable_rotation: float = .01
+    safety_penalty: float = 0.  # explicit task-objective experiment; legacy rewards remain default
 
 
 def parse_scales(value):
@@ -62,6 +63,8 @@ class BatchedAssemblyEnv:
         if self.ecfg.stability_metric not in ('velocity','pose'):raise ValueError('Unknown stability metric')
         if self.ecfg.max_contact_depth is not None and self.ecfg.max_contact_depth<=0:
             raise ValueError('Contact depth limit must be positive')
+        if not np.isfinite(self.ecfg.safety_penalty) or self.ecfg.safety_penalty<0:
+            raise ValueError('Safety penalty must be finite and nonnegative')
         self.task_names = list(task_names)
         self.task = np.array(task_of_env, dtype=np.int64)
         self.N = len(self.task)
@@ -99,12 +102,19 @@ class BatchedAssemblyEnv:
         self._refresh()
         self.hist[ids]=self.frames[ids,None]
 
+    def _forward_world(self, i):
+        d=self.data[i]
+        mujoco.mj_setState(self.m,d,self.state[i],STATE_SPEC)
+        d.ctrl[:]=self.last_ctrl[i]
+        mujoco.mj_forward(self.m,d)
+
+    def _forward_states(self):
+        for i in range(self.N):self._forward_world(i)
+
     def _refresh(self):
+        self._forward_states()
         prop=[];points_p=[];points_R=[];pp=[];pq=[]
         for i,d in enumerate(self.data):
-            mujoco.mj_setState(self.m,d,self.state[i],STATE_SPEC)
-            d.ctrl[:]=self.last_ctrl[i]
-            mujoco.mj_forward(self.m,d)
             row=[];bp=[];br=[]
             for side in ('left','right'):
                 site=self.m.site(side+'_gripperframe').id
@@ -219,4 +229,4 @@ class BatchedAssemblyEnv:
         cost=self.ecfg.cost_coef*((a*a).sum(1)+(vel[:,-1]**2/25).sum(1)+((torque/limit)**2).sum(1))
         self.hist=np.concatenate((self.hist[:,1:],self.frames[:,None]),axis=1)
         info=dict(success=success,safety=safety,timeout=timeout,d_asm=distance,cost=cost,unstable=unstable)
-        return (success-cost).astype(np.float32),success|safety|timeout,info
+        return (success-cost-self.ecfg.safety_penalty*safety).astype(np.float32),success|safety|timeout,info

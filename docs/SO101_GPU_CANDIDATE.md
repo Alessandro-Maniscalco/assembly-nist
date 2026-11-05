@@ -1,8 +1,8 @@
-# Isolated GPU collision candidate
+# Optional GPU physics qualification
 
 **Goal:** Qualify isolated GPU collision variants while preserving native reference evidence and the original PPO/SimBa/SGS.
 
-**Status, 2026-11-05:** Menagerie jaws and the raw-helper-mesh GPU variant remain rejected. The whole-helper SDF variant passes full tool replay and 64-world functional environment checks. Two subsequent PPO pilots stop on solver-iteration exhaustion, including with a 200-iteration cap. Native physics remains the unattended training backend. No result here establishes learned loose-part assembly or hardware transfer.
+**Status, 2026-11-05:** The whole-helper SDF backend passes geometry, tool, environment and a five-update 128-world PPO pilot at the explicit float32 tolerance 1e-6. It is selected for the bounded overnight run; native remains the default/reference. Earlier Menagerie, raw-helper-mesh and 1e-8 solver failures are preserved below. No result establishes learned loose-part assembly or hardware transfer.
 
 ## Candidate and explicit deviations
 
@@ -275,3 +275,43 @@ A separate matched scaling probe repeats the same 64-state mixture of 32 indepen
 | 256 | 53.59 | 5.47 | 5,299 |
 
 These short measurements favor 128 worlds only modestly; the orchestrator selected 128 for a fresh actual PPO pilot. They do not establish a learned assembly rate or justify extrapolating throughput to larger batches. Evidence and the unchanged runtime hashes are indexed in `artifacts_local/whole_helper_gpu_tol1e6/handoff.json`. Reproduce the solver case with `scripts/check_so101_gpu_solver.py`; `scripts/check_so101_warp_env.py --case collection` provides the matched scaling probe. Use fresh output directories to preserve the earlier failures.
+
+## Passing learner pilot and bounded run
+
+`runs/so101_gpu_tol1e6_20261105` starts from the native v2 final iteration 112 weights with fresh optimizer/SGS. Five complete updates produce 20,480 transitions and 153 episodes, including 45 prepared-TRAIN successes, with finite losses, zero solver overflow and zero numerical failures. Measured end-to-end throughput is 61.27–66.80 transitions/s. The final checkpoint was verified before supervisor resume through 14:45 UTC; independent reviews use canonical native physics. Pilot evidence is `pilot_result.json`; this is not a loose-assembly success benchmark.
+
+To recreate the archive after the canonical assets, bank and scripted tool trace are available:
+
+```bash
+.venv/bin/python -m pip install -e '.[so101,so101-gpu]'
+.venv/bin/python scripts/so101_helper_sdf.py
+.venv/bin/python scripts/check_so101_helper_sdf.py --case geometry
+.venv/bin/python scripts/check_so101_helper_sdf.py --case frames
+.venv/bin/python scripts/check_so101_helper_sdf.py --case states
+.venv/bin/python scripts/check_so101_helper_sdf.py --case replay \
+  --replay artifacts_local/tool_pickup/raised10_coast
+.venv/bin/python scripts/check_so101_warp_env.py --case prepare_candidate \
+  --replay artifacts_local/helper_sdf/native_tool_replay \
+  --out artifacts_local/whole_helper_gpu/model
+```
+
+Inspect each report, repeat the tool/environment/runtime checks above, and run a fresh learner pilot before unattended use. Native and GPU geometry are approximations with separate provenance; larger batches and exact GPU continuation are not automatically qualified.
+
+## Endpoint forwarding and behavioral review
+
+The first bounded GPU continuation stopped cleanly at iteration 68 after the
+14:01 frozen iteration-60 native loose check produced 0/10 successes and ten
+safety terminations. It had no numerical/solver failures. This behavioral
+regression is separate from engine qualification; see [status](SO101_STATUS.md).
+
+Profiling then isolates native endpoint `mj_forward` as about 0.57 s of a
+0.59 s serial refresh for 128 worlds. Eight independent native-data workers
+reduce the endpoint to about 0.091 s; unchanged observation packing takes about
+0.011 s. All 16 frozen and 28 live integration checks match exactly, including
+contacts/forces, sensors, success/stability, history and partial resets. Native
+environments remain serial; the GPU adapter retains `endpoint_threads=1` as a
+fallback and records the selected count plus `env.py` in its runtime identity.
+This is an endpoint-only speedup until a complete learner is timed. Initial
+profiling exceeded its strict 3 GiB limit by 55.6 MiB; the separately bounded
+production qualification peaks at 3.12 GiB under a 4 GiB limit, with ample host
+headroom. Reports remain under `artifacts_local/refresh_profile/`.

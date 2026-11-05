@@ -7,6 +7,7 @@ whole-helper SDF variant imports its supplied model directly with no additional
 exclusions. A per-step domain guard applies only to the legacy separation proof.
 """
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -21,6 +22,7 @@ from .warp_physics import WarpPhysics
 
 GPU_SOLVER_TOLERANCE = 1.e-6  # MJWarp's documented float32 importer floor.
 GPU_SOLVER_ITERATIONS = 200
+ENDPOINT_THREADS = 8
 
 
 class MixedPhysics(WarpPhysics):
@@ -335,14 +337,15 @@ def archived_helper_factory(path):
     return factory
 
 
-def physics_identity(factory):
+def physics_identity(factory, endpoint_threads=ENDPOINT_THREADS):
     """Pin the optional runtime separately from the canonical reset-bank model."""
     import hashlib
     from importlib.metadata import version
     provenance=factory.provenance
-    files=('assembly_policy/so101/warp_env.py','assembly_policy/so101/warp_physics.py',
+    files=('assembly_policy/so101/env.py','assembly_policy/so101/warp_env.py','assembly_policy/so101/warp_physics.py',
            'scripts/so101_gpu_fp32.py')
     return dict(backend='whole_helper_sdf',model_sha256=provenance['model_sha256'],
+        endpoint_threads=endpoint_threads,
         solver=dict(gpu_tolerance=GPU_SOLVER_TOLERANCE,gpu_iterations=GPU_SOLVER_ITERATIONS,
                     gpu_ls_iterations=100,contact_sensor_maxmatch=512),
         helper_manifest_sha256=provenance['helper_manifest_sha256'],
@@ -354,11 +357,38 @@ def physics_identity(factory):
 class BatchedWarpAssemblyEnv(BatchedAssemblyEnv):
     """Opt-in prototype using the unchanged native environment's public methods."""
     def __init__(self, task_names, task_of_env, ecfg=None, proof_dir=None, *,
-                 model_factory=None, model_variant="separated_jaws"):
+                 model_factory=None, model_variant="separated_jaws", endpoint_threads=ENDPOINT_THREADS):
+        if endpoint_threads not in (1, ENDPOINT_THREADS):
+            raise ValueError('Endpoint refresh supports serial or eight workers')
+        self._endpoint_pool = None
         cfg = ecfg or EnvConfig()
         if model_variant == 'whole_helper_sdf' and model_factory is None:
             raise ValueError('Whole-helper GPU variant requires an explicit qualified model factory')
         super().__init__(task_names, task_of_env, replace(cfg, nthread=1), model_factory=model_factory)
         self.engine.close()
+        self.engine = None
         self.ecfg = cfg
-        self.engine = WarpRollout(self.m, self.N, proof_dir=proof_dir, model_variant=model_variant)
+        try:
+            self.engine = WarpRollout(self.m, self.N, proof_dir=proof_dir, model_variant=model_variant)
+            self.engine.options['endpoint_threads'] = endpoint_threads
+            if endpoint_threads > 1:
+                self._endpoint_pool = ThreadPoolExecutor(max_workers=endpoint_threads,
+                                                         thread_name_prefix='so101-endpoint')
+        except BaseException:
+            self.close()
+            raise
+
+    def _forward_states(self):
+        # Each worker owns a different MjData; the shared model is read-only.
+        # Waiting for every future also propagates native errors before packing.
+        if self._endpoint_pool is None:
+            super()._forward_states()
+        else:
+            list(self._endpoint_pool.map(self._forward_world, range(self.N)))
+
+    def close(self):
+        if self._endpoint_pool is not None:
+            self._endpoint_pool.shutdown(wait=True)
+            self._endpoint_pool = None
+        if self.engine is not None:
+            self.engine.close()

@@ -23,6 +23,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--runs',type=Path,nargs='+',required=True)
     p.add_argument('--out',type=Path,default=ROOT/'artifacts_local/overnight_progress')
+    p.add_argument('--title',default='SO101 curriculum pilot — TRAIN includes prepared held starts')
     a=p.parse_args();a.out.parent.mkdir(parents=True,exist_ok=True)
     fig,axes=plt.subplots(2,2,figsize=(12,7),constrained_layout=True)
     total=0;previous=None;summary=[];evaluations=[]
@@ -40,7 +41,9 @@ def main():
         def rate(count):
             return np.array([count[max(0,i-9):i+1].sum()/max(episodes[max(0,i-9):i+1].sum(),1)
                              for i in range(len(records))])
-        color=colors[phase%len(colors)];label=f'Phase {phase+1}'
+        color=colors[phase%len(colors)]
+        backend='GPU physics' if cfg.get('physics_backend','native')!='native' else 'native physics'
+        label=f'Phase {phase+1}: {backend}'
         axes[0,0].plot(x,100*rate(successes),color=color,label=label)
         axes[0,1].plot(x,100*rate(unsafe),color=color)
         axes[1,0].plot(x,[r['vf'] for r in records],color=color,alpha=.8)
@@ -56,7 +59,7 @@ def main():
             parent_policy=parent))
         for report in path.glob('reviews/*/evaluation.json'):
             r=json.loads(report.read_text())
-            evaluations.append(dict(report=str(report.resolve()),mtime=report.stat().st_mtime,
+            evaluations.append(dict(phase=phase+1,report=str(report.resolve()),mtime=report.stat().st_mtime,
                 successes=sum(t['successes'] for t in r['tasks'].values()),
                 trials=sum(t['trials'] for t in r['tasks'].values()),distribution=r['distribution']))
         total+=records[-1]['transitions'];previous=records[-1]
@@ -69,9 +72,9 @@ def main():
         ax.set_xlabel('Transitions along the weights lineage');ax.grid(alpha=.18)
         ax.ticklabel_format(axis='x',style='sci',scilimits=(0,0))
     latest=max(evaluations,key=lambda x:x['mtime']) if evaluations else None
-    evaluation=(f"Latest independent loose-start check: {latest['successes']}/{latest['trials']} successes"
+    evaluation=(f"Latest completed loose-start check (phase {latest['phase']}): {latest['successes']}/{latest['trials']} successes"
                 if latest else 'Independent loose-start evaluation pending')
-    fig.suptitle('SO101 curriculum pilot — TRAIN includes prepared held starts\n'+evaluation,fontsize=13)
+    fig.suptitle(a.title+'\n'+evaluation,fontsize=13)
     fig.savefig(a.out.with_suffix('.png'),dpi=150)
     a.out.with_suffix('.json').write_text(json.dumps(dict(phases=summary,total_lineage_transitions=total,
         independent_evaluations=evaluations,notes=['Rates use episode-weighted windows of up to ten iterations.',

@@ -2,6 +2,8 @@
 
 **Goal:** Choose a memory-safe local collection/learning configuration while preserving source PPO, SimBa, SGS, SDF equations and contact settings.
 
+Current optional GPU measurements and numerical deviations are in [GPU qualification](SO101_GPU_CANDIDATE.md): the later whole-helper-SDF pilot reaches 61–67 end-to-end transitions/s at 128 worlds. The measurements below preserve the earlier native baseline and rejected prototype; their fixture and status are historical.
+
 Measured 2026-11-05 on an i9-9900K (8 cores / 16 threads), approximately 15 GiB host RAM, RTX 5080 16 GB, MuJoCo 3.17 and PyTorch 2.11/CUDA 12.8. These are short throughput measurements, not learned assembly results. The fixture predates the passive tool sleeve and final gripper contact revisions; rerun after integration.
 
 ## Native collection

@@ -42,6 +42,7 @@ def parse(argv=None):
     ap.add_argument("--suite", choices=["nist", "so101"], default="nist")
     ap.add_argument("--so101-max-contact-depth",type=float,default=None)
     ap.add_argument("--so101-stability",choices=['velocity','pose'],default='velocity')
+    ap.add_argument("--so101-safety-penalty",type=float,default=0.)
     ap.add_argument("--so101-physics",choices=['native','whole_helper_sdf'],default='native')
     ap.add_argument("--so101-physics-model",help='Qualified sensor-equipped helper-SDF MJB for the optional GPU backend')
     ap.add_argument("--tasks", default="all20", help="all20 (default), or a task set / '+'-separated list")
@@ -144,7 +145,8 @@ class Trainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=a.lr)    # one optimizer for actor and critic
         self.lr, self.it, self.transitions = a.lr, 0, 0
         self._children = []                                             # background evaluations
-        extra={} if self.backend is None else dict(max_contact_depth=a.so101_max_contact_depth,stability_metric=a.so101_stability)
+        extra={} if self.backend is None else dict(max_contact_depth=a.so101_max_contact_depth,
+            stability_metric=a.so101_stability,safety_penalty=a.so101_safety_penalty)
         self.ecfg = config_type(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=scales(a.action_scale_joints),**extra)
         self.args = dict(vars(a), env={k: v for k, v in dataclasses.asdict(self.ecfg).items() if k != "nthread"})
         env_type=None if self.backend is None else self.backend.BatchedAssemblyEnv

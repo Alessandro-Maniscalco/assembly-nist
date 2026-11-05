@@ -63,6 +63,23 @@ were performed. Halving both grid spacings would require approximately 480 MB
 of new grid files while preserving the actual triangle interference; no such
 grids were generated.
 
+## Printable-source cross-check
+
+The vendor `White LeRobot.3mf` archive (Drive file
+`1k9OhYWwfIUYxOiEZPKk0ycR2uBvWMZC9`) has SHA256
+`2c74eb7ab377c2ffbd1d37c6e381d3483fde1359a5851c7d630e5fdc4dc09710`.
+Its base is root object 16, mesh object 15, named `Document_2`, in
+`3D/Objects/object_41.model`. Its centred extents uniquely match the render
+base within 0.134 µm; bidirectional surface checks confirm identity-frame
+alignment without fitted transforms. The meshes have different tessellation,
+with sampled surface differences up to 0.173 mm; global equivalence is not claimed.
+All four rail sections again measure **31.800 mm**, so the nominal cavity
+mismatch also exists in the printable source. This does not prove that the
+interference was intentional or that a physical PLA press fit is appropriate.
+Component/build transforms and relevant slicer settings are preserved in
+`artifacts_local/mating_geometry_audit/printable_source/printable_base_report.json`;
+the adjacent `check_printable_base.py` reproduces this read-only check.
+
 ## Reproduce and inspect
 
 From the repository root, with the local vendor assets and archived trajectories:

@@ -19,3 +19,23 @@ def opposed_mounts(model):
     b=model.body('left_base').id
     model.body_pos[b]=[-.011,.40,.0024]
     model.body_quat[b]=[np.sqrt(.5),0.,0.,-np.sqrt(.5)]
+
+
+def compact_opposed_mounts(model):
+    """Scratch pickup layout for the closer, opposed assembly posture."""
+    opposed_mounts(model)
+    model.body_pos[model.body('left_base').id,1]=.25
+    for name,axis,value in [('base',1,-.08),('yoke',0,-.13),('screw',0,.07)]:
+        q=model.jnt_qposadr[model.joint(name+'_free').id]
+        model.qpos0[q+axis]=value
+        model.body_pos[model.body(name).id,axis]=value
+
+
+def table_opposed_mounts(model):
+    """Scratch spacing that leaves wrist travel for upright table placement."""
+    opposed_mounts(model)
+    model.body_pos[model.body('left_base').id,1]=.35
+    for name,axis,value in [('base',1,0.),('screw',0,.16),('screw',1,.01)]:
+        q=model.jnt_qposadr[model.joint(name+'_free').id]
+        model.qpos0[q+axis]=value
+        model.body_pos[model.body(name).id,axis]=value

@@ -27,18 +27,20 @@ def main():
     ap.add_argument('--grasp-yaw', type=float, default=180., help='Degrees; site is fixed finger, not jaw midpoint')
     ap.add_argument('--arm-spacing', type=float, default=None)
     ap.add_argument('--insert', action='store_true')
-    ap.add_argument('--layout',choices=['current','front','opposed'],default='current')
+    ap.add_argument('--layout',choices=['current','front','opposed','compact','table'],default='current')
     ap.add_argument('--align-motor',action='store_true',help='Use measured held-part orientation when planning insertion')
     ap.add_argument('--stabilize', action='store_true')
     ap.add_argument('--support-style',choices=['foot','rear','sidefoot','horizontal'],default='foot')
+    ap.add_argument('--support-rear-offset',type=float,default=0.,help='Optional rearward shift of horizontal base grasp, metres')
+    ap.add_argument('--stop-after-lift',action='store_true',help='Archive the physical pickup prefix with both grasps retained')
     ap.add_argument('--seed', type=int, default=None)
     ap.add_argument('--max-penetration', type=float, default=.0004)
     args = ap.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     m = model()
-    if args.layout in ('front','opposed'):
-        from .layout import front_mount, opposed_mounts
-        (front_mount if args.layout=='front' else opposed_mounts)(m)
+    if args.layout in ('front','opposed','compact','table'):
+        from .layout import front_mount, opposed_mounts, compact_opposed_mounts, table_opposed_mounts
+        {'front':front_mount,'opposed':opposed_mounts,'compact':compact_opposed_mounts,'table':table_opposed_mounts}[args.layout](m)
     if args.arm_spacing is not None:
         m.body_pos[m.body('left_base').id,0]=-args.arm_spacing
         m.body_pos[m.body('right_base').id,0]=args.arm_spacing
@@ -94,7 +96,7 @@ def main():
               'jaw',d.qpos[11],'peak penetration',max(log.depths),flush=True)
     def move(side,pose,seconds,label,yaw,orientation=None):
         ctrl=d.ctrl.copy();a=0 if side=='left' else 6
-        axes=(0,2) if orientation is not None and side=='right' and args.align_motor and args.layout in ('front','opposed') else None
+        axes=(0,2) if orientation is not None and side=='right' and args.align_motor and args.layout in ('front','opposed','compact','table') else None
         ctrl[a:a+5]=ik(m,d.qpos,side,np.asarray(pose),down_rotation(yaw) if orientation is None else orientation,orientation_axes=axes)
         advance(ctrl,seconds,label)
     def grip(side,value,seconds,label):
@@ -106,7 +108,7 @@ def main():
         Rbase=d.body('base').xmat.reshape(3,3).copy()
         if args.stabilize:
             if args.support_style=='horizontal':
-                support=base_start+Rbase@np.array([-.019,.015,.019])
+                support=base_start+Rbase@np.array([-.019,.015+args.support_rear_offset,.019])
                 high=support.copy();high[2]=.14
                 horizontal=np.column_stack(([0.,-1.,0.],[0.,0.,-1.],[1.,0.,0.]))
                 def move_support(point,seconds,label):move('left',point,seconds,label,0,horizontal)
@@ -152,6 +154,7 @@ def main():
         move('right',pose,3.,'Lift motor',yaw)
         if d.body('motor').xpos[2]<motor_start[2]+.025:
             raise RuntimeError('Motor grasp did not produce a 25mm lift')
+        if args.stop_after_lift:return
         if args.insert:
             # Relative held transform is measured after the physical grasp.
             held_delta=d.body('motor').xpos-d.site('right_gripperframe').xpos
@@ -219,8 +222,8 @@ def main():
         meta=metadata();target=origins(meta);base=d.body('base')
         goal=base.xpos+base.xmat.reshape(3,3)@(target['motor']-target['base'])
         report=log.save(args.out,dict(failure=failure,completed_script=failure is None,
-            requested_insertion=args.insert,supporting_arm_used=args.stabilize,seed=args.seed,
-            insertion_orientation_axes='world roll/yaw; pitch unconstrained' if args.align_motor and args.layout in ('front','opposed') else 'full requested orientation',
+            requested_insertion=args.insert,stopped_after_lift=args.stop_after_lift,supporting_arm_used=args.stabilize,seed=args.seed,
+            insertion_orientation_axes='world roll/yaw; pitch unconstrained' if args.align_motor and args.layout in ('front','opposed','compact','table') else 'full requested orientation',
             motor_lift_m=None if motor_start is None else float(max_height-motor_start[2]),
             motor_start=None if motor_start is None else motor_start.tolist(),
             motor_final=d.body('motor').xpos.tolist(),motor_goal=goal.tolist(),

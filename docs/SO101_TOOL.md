@@ -131,3 +131,50 @@ denser local sampling finds 2.30 mm omissions. Two minimal patch attempts failed
 coverage or added-overfill gates and remain unpromoted. Run
 `python -m scripts.check_so101_menagerie_collision --out artifacts_local/so101_tool/menagerie_comparison.json`
 for the comparison and plot. The running pilot continues to use the fine SDFs.
+
+## Prepared bit-to-screw coupling: physical motion, failed qualification
+
+`scripts/check_so101_prepared_screw.py` uses the unchanged canonical model and
+only robot controls after initialization. A prepared assembly at X = −0.10 m,
+Y = 0.06 m permits a vertical driver grasp; four checked central-position IK
+branches hit the wrist limit. The screw starts inside the bore and the bit inside
+the nominal cross recess with clearance. This excludes pickup and alignment.
+
+A 5,600-step trace physically presses the button, turns the screw 2.794 revolutions,
+and advances it 1.414 mm relative to the motor, versus 1.397 mm from nominal pitch.
+It remains finite, warning-free and below 0.126 mm native contact depth, then
+releases the button and coasts down. **It fails qualification:** screw angular
+speed reaches 63.06 rad/s against the 30 rad/s guard; coupling is lost before
+the spindle stops; and 22 final bit/head contacts remain. Final placement error
+0.855 mm alone is insufficient for screw-task success or release/retention.
+
+The first trace records the speed violation for a subsequent full audit. Later
+trials stop at the guard: a shorter preloaded attempt stops at 0.443 s, while
+40 ms physical squeeze pulses never activate the button. No force, geometry,
+solver or actuator-strength change was made. Evidence, hashes and every failed
+trial are indexed in `artifacts_local/prepared_screw/handoff.json`.
+
+The next design question is positive tool location against the fixed finger,
+while preserving the moving jaw's arc and physical button travel. Startup and
+reaction torque also need identification. As a hardware design reference,
+[Mountz's lever-operated BF035](https://www.mountztorque.com/BF035-ESD-Brushless-Electric-Screwdriver)
+provides selectable 0.2–0.6 s soft start and a shock-absorbing clutch. Those
+features are not implemented or claimed for the current HOTO-style proxy.
+
+## Isolated fixed-finger locator and rocking pad
+
+One fixed-finger pocket candidate has a sampled entry/exit path but fails gravity
+settling at 0.322 mm penetration at the unchanged moving-jaw/flat-pad contact.
+A follow-up passive rocker, aligned with the jaw hinge axis, accommodates that
+arc: gravity settling and physical activation pass, with 0.120 mm peak depth and
+25.92 rad/s spindle speed. The trial then stops at 0.010024 rad tool rotation,
+just beyond its predeclared 0.01 rad retention gate. Axis drift is 0.007158 rad
+and translation 0.161 mm. OFF completion, reaction-torque trials and screw replay
+were not reached.
+
+The new hinge, preload and clearance are design assumptions. This supports a
+rocking actuator face, but independent roll/tilt location against the fixed
+finger remains inadequate. The candidate is **not promoted** to training or
+the production tool. `scripts/check_so101_fixed_finger_pocket.py` reproduces the
+isolated checks; `artifacts_local/prepared_screw/fixed_finger_pocket/handoff.json`
+indexes every model, trace and rejected result.

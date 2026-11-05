@@ -1,7 +1,7 @@
 """Fixed-seed prepared-near holdout; never a loose-part assembly benchmark.
 
-Only this script and artifacts_local/near_holdout are written. Preparation uses
-the already qualified native generators without changing geometry or controls.
+An explicit output directory can reuse immutable, qualified preparation from a
+previous run. Preparation uses native generators without changing geometry.
 """
 import argparse
 from collections import deque
@@ -27,6 +27,10 @@ SOURCES = {
 }
 
 
+class ResourceLimitError(RuntimeError):
+    """Abort the complete probe rather than replace a resource-failed trial."""
+
+
 def sha(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -47,15 +51,83 @@ def resources(deadline):
     process = psutil.Process()
     rss = process.memory_info().rss
     if rss > 2.5*1024**3:
-        raise RuntimeError(f'Probe RSS exceeds 2.5 GiB: {rss}')
-    while psutil.virtual_memory().available < 2*1024**3:
-        if time.time() >= deadline:
-            raise TimeoutError('Insufficient host memory before deadline')
-        time.sleep(5)
+        raise ResourceLimitError(f'Probe RSS exceeds 2.5 GiB: {rss}')
+    if psutil.virtual_memory().available < 2*1024**3:
+        raise ResourceLimitError('Host available memory is below 2 GiB')
     if time.time() >= deadline:
         raise TimeoutError('Bounded holdout deadline reached')
     return dict(rss_bytes=rss, available_bytes=psutil.virtual_memory().available,
                 peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024)
+
+
+def run_child(command, deadline, env, stdout=None):
+    """Watch memory even while native compilation cannot call resources()."""
+    import psutil
+    proc = subprocess.Popen(command, cwd=ROOT, env=env, stdout=stdout,
+                            stderr=subprocess.STDOUT if stdout else None)
+    try:
+        child = psutil.Process(proc.pid)
+        while proc.poll() is None:
+            resources(deadline)
+            try:
+                child_rss = child.memory_info().rss
+            except psutil.NoSuchProcess:
+                if proc.poll() is not None:
+                    break
+                raise
+            if child_rss > 2.5*1024**3:
+                raise ResourceLimitError('Child probe RSS exceeds 2.5 GiB')
+            time.sleep(.5)
+        return proc.returncode
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def reuse_preparation(directory):
+    directory = Path(directory).resolve()
+    if directory == OUT:
+        raise ValueError('Reused preparation must remain in a separate directory')
+    original = json.loads((directory/'manifest.json').read_text())
+    reference = json.loads((directory/'results.json').read_text())
+    assert original['fixed_tasks'] == list(TASKS) and original['fixed_seeds'] == list(SEEDS)
+    assert original['replacements_allowed'] is False
+    assert reference['completed'] and len(reference['preparation']) == 12
+    assert sha(directory/'policy.pt') == original['checkpoint_sha256'] == reference['checkpoint_sha256']
+    qualified = {(r['task'], r['seed']): r for r in reference['preparation']}
+    hashes, states, model_hashes = {}, {}, {}
+    for task, source in original['sources'].items():
+        assert Path(source['path']).resolve() == SOURCES[task].resolve()
+        assert sha(source['path']) == source['sha256'], f'Changed preparation source: {task}'
+    for task in TASKS:
+        for seed in SEEDS:
+            row = qualified[task, seed]
+            assert row['qualified'], f'Unqualified archived start: {task}/{seed}'
+            stem = f'{task}_{seed}'
+            states[stem] = row['state_sha256']
+            for suffix in ('.json', '.npz', '.mjb'):
+                path = directory/(stem+suffix)
+                stat = path.stat()
+                identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                if suffix == '.mjb' and identity in model_hashes:
+                    digest = model_hashes[identity]
+                else:
+                    digest = sha(path)
+                    if suffix == '.mjb':
+                        model_hashes[identity] = digest
+                hashes[path.name] = digest
+    return dict(preparation_directory=str(directory),
+                preparation_source_manifest_sha256=sha(directory/'manifest.json'),
+                preparation_reference_results_sha256=sha(directory/'results.json'),
+                preparation_artifact_sha256=hashes, preparation_state_sha256=states,
+                reference_checkpoint_sha256=reference['checkpoint_sha256'],
+                reference_summary=reference['summary'],
+                reference_model_signature=reference['model_signature'])
 
 
 def generate(task, seed, deadline):
@@ -85,7 +157,12 @@ def evaluate(deadline):
     # compiler buffers to libc. PointTables reuses this exact read-only model,
     # avoiding a second copy of the 372 MiB visual mesh asset set.
     manifest = json.loads((OUT/'manifest.json').read_text())
-    source_config = json.loads(Path(manifest['checkpoint_source']).with_name('config.json').read_text())
+    source_config = json.loads((OUT/'config.json').read_text())
+    preparation_dir = Path(manifest.get('preparation_directory', OUT))
+    assert sha(OUT/'policy.pt') == manifest['checkpoint_sha256'], 'Frozen checkpoint changed'
+    assert sha(OUT/'config.json') == manifest['config_sha256'], 'Frozen configuration changed'
+    if preparation_dir != OUT:
+        assert reuse_preparation(preparation_dir) == manifest['reused_preparation'], 'Archived preparation changed'
     tasks = resolve_tasks(source_config['tasks'])
     env = BatchedAssemblyEnv(tasks, [0], EnvConfig(**{**source_config['env'], 'nthread': 1}))
     import ctypes
@@ -101,9 +178,12 @@ def evaluate(deadline):
     torch.set_num_threads(2)
     torch.set_num_interop_threads(1)
     checkpoint = torch.load(OUT/'policy.pt', map_location='cpu', weights_only=False)
+    assert checkpoint['it'] >= manifest.get('minimum_checkpoint_iteration', 0), 'Checkpoint predates requested iteration'
     cfg = checkpoint['args']
     assert json.loads(json.dumps(cfg['env'])) == source_config['env'] and cfg['tasks'] == source_config['tasks']
     assert cfg['model_signature'] == signature(), 'Canonical model changed'
+    if preparation_dir != OUT:
+        assert cfg['model_signature'] == manifest['reused_preparation']['reference_model_signature']
     assert cfg['env']['max_contact_depth'] == .0004
     assert cfg['env']['stability_metric'] == 'pose'
     tasks = resolve_tasks(cfg['tasks'])
@@ -114,12 +194,16 @@ def evaluate(deadline):
     result.update(checkpoint_iteration=checkpoint['it'], checkpoint_transitions=checkpoint['transitions'],
                   parent_policy=cfg.get('parent_policy'), environment=cfg['env'],
                   model_signature=cfg['model_signature'], bank_signature=cfg.get('bank_signature'),
+                  training_backend=cfg.get('physics_backend', 'native'), evaluation_backend='native',
+                  training_physics_signature=cfg.get('physics_signature', cfg['model_signature']),
                   evaluation_seed=880301, preparation=[], episodes=[],
                   completion_scope='Production control-sampled release and eleven-pose 0.4 s retention; no claim of continuous no-contact retention')
     lineage, parent, visited = [], cfg.get('parent_policy'), set()
     while parent and parent.get('path') not in visited:
         path = Path(parent['path'])
         visited.add(str(path))
+        if parent.get('sha256'):
+            assert sha(path) == parent['sha256'], 'Parent checkpoint changed'
         ancestor = torch.load(path, map_location='cpu', weights_only=False)
         lineage.append(dict(path=str(path), sha256=sha(path), iteration=ancestor['it'],
                             transitions=ancestor['transitions'], model_signature=ancestor['args'].get('model_signature'),
@@ -187,7 +271,7 @@ def evaluate(deadline):
             source = json.loads(SOURCES[task].read_text())
             for seed in SEEDS:
                 resources(deadline)
-                stem = OUT/f'{task}_{seed}'
+                stem = preparation_dir/f'{task}_{seed}'
                 row = dict(task=task, seed=seed, qualified=False)
                 try:
                     report = json.loads(stem.with_suffix('.json').read_text())
@@ -209,6 +293,8 @@ def evaluate(deadline):
                     del all_states
                     state[0] = 0.
                     state_sha = hashlib.sha256(state.tobytes()).hexdigest()
+                    if preparation_dir != OUT:
+                        assert state_sha == manifest['reused_preparation']['preparation_state_sha256'][stem.name]
                     assert state_sha not in train_states[task], 'Exact TRAIN state duplicate'
                     env.set_states([0], state[None], [tasks.index(task)])
                     # Generator holds use a tighter commanded aperture than the
@@ -233,6 +319,8 @@ def evaluate(deadline):
                     assert not any(any(r.values()) for r in zero_trace), 'Zero-action check terminated'
                     row['qualified'] = True
                     states.append((task, seed, state))
+                except (ResourceLimitError, TimeoutError):
+                    raise
                 except Exception as exc:
                     row['rejection'] = f'{type(exc).__name__}: {exc}'
                 result['preparation'].append(row)
@@ -328,6 +416,8 @@ def evaluate(deadline):
                             max_rotation_from_window_start_rad=float((2*np.arccos(np.clip(abs(fq@q[0]),0,1))).max()),
                             scope='Supplemental every-step geometry audit; production success uses control-sampled release')
                         del audit
+                except (ResourceLimitError, TimeoutError):
+                    raise
                 except Exception as exc:
                     record['error'] = f'{type(exc).__name__}: {exc}'
                 stem = OUT/f'{mode}_{task}_{seed}'
@@ -354,22 +444,30 @@ def evaluate(deadline):
 
 
 def main():
+    global OUT
     parser = argparse.ArgumentParser()
     parser.add_argument('--policy', default=str(ROOT/'runs/so101_overnight_near_v2_20261105/checkpoint.pt'))
     parser.add_argument('--generate', choices=TASKS)
     parser.add_argument('--seed', type=int)
     parser.add_argument('--evaluate', action='store_true')
     parser.add_argument('--deadline', type=float)
+    parser.add_argument('--out', type=Path, default=OUT)
+    parser.add_argument('--reuse-preparation', type=Path,
+                        help='Read the exact qualified starts from this archived holdout; never regenerate them')
+    parser.add_argument('--min-iteration', type=int, default=0)
     args = parser.parse_args()
+    OUT = args.out.resolve()
     deadline = args.deadline or time.time()+24*60
     OUT.mkdir(parents=True, exist_ok=True)
     if args.generate:
         generate(args.generate,args.seed,deadline)
         return
     if args.evaluate:
+        if (OUT/'results.json').exists():
+            raise FileExistsError('Preserve existing first-episode evaluation results')
         evaluate(deadline)
         return
-    if (OUT/'manifest.json').exists():
+    if (OUT/'manifest.json').exists() or (OUT/'policy.pt').exists():
         raise FileExistsError('Preserve existing holdout; choose an explicit continuation step')
     # The trainer publishes with os.replace. Opening once keeps a coherent inode
     # while it publishes a later checkpoint; this copy is itself atomically published.
@@ -378,30 +476,40 @@ def main():
         target.flush()
         os.fsync(target.fileno())
     os.replace(OUT/'policy.pt.tmp',OUT/'policy.pt')
+    shutil.copyfile(Path(args.policy).resolve().with_name('config.json'), OUT/'config.json')
     manifest = dict(distribution='HELD-OUT PREPARED NEAR', full_loose_assembly=False,
                     checkpoint_source=str(Path(args.policy).resolve()), checkpoint_sha256=sha(OUT/'policy.pt'),
+                    config_sha256=sha(OUT/'config.json'),
+                    minimum_checkpoint_iteration=args.min_iteration,
                     snapshot_time_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
                     fixed_tasks=list(TASKS), fixed_seeds=list(SEEDS), replacements_allowed=False,
                     native_gripper_limit_Nm=.35, maximum_cpu_threads=2,
                     sources={task:dict(path=str(path),sha256=sha(path)) for task,path in SOURCES.items()},
                     preparation_processes=[])
+    if args.reuse_preparation:
+        reused = reuse_preparation(args.reuse_preparation)
+        manifest.update(preparation_directory=reused['preparation_directory'], reused_preparation=reused)
     write(OUT/'manifest.json',manifest)
     env={**os.environ,'OPENBLAS_NUM_THREADS':'1','OMP_NUM_THREADS':'2','MKL_NUM_THREADS':'2'}
-    for task in TASKS:
+    for task in (() if args.reuse_preparation else TASKS):
         for seed in SEEDS:
             resources(deadline)
             log = OUT/f'{task}_{seed}.log'
             with log.open('w') as stream:
-                proc=subprocess.run([sys.executable,__file__,'--generate',task,'--seed',str(seed),'--deadline',str(deadline)],
-                                    cwd=ROOT,env=env,stdout=stream,stderr=subprocess.STDOUT,
-                                    timeout=max(1,deadline-time.time()))
-            manifest['preparation_processes'].append(dict(task=task,seed=seed,returncode=proc.returncode))
+                returncode=run_child([sys.executable,__file__,'--generate',task,'--seed',str(seed),
+                                      '--deadline',str(deadline),'--out',str(OUT)], deadline, env, stream)
+            manifest['preparation_processes'].append(dict(task=task,seed=seed,returncode=returncode))
             write(OUT/'manifest.json',manifest)
             print(json.dumps(manifest['preparation_processes'][-1]),flush=True)
-    proc=subprocess.run([sys.executable,__file__,'--evaluate','--deadline',str(deadline)],cwd=ROOT,env=env,
-                        timeout=max(1,deadline-time.time()))
-    raise SystemExit(proc.returncode)
+    returncode=run_child([sys.executable,__file__,'--evaluate','--deadline',str(deadline),
+                          '--out',str(OUT)], deadline, env)
+    raise SystemExit(returncode)
 
 
 if __name__=='__main__':
-    main()
+    try:
+        main()
+    except (ResourceLimitError, TimeoutError) as exc:
+        write(OUT/'execution_failure.json', dict(error=f'{type(exc).__name__}: {exc}',
+              time_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), replacements_allowed=False))
+        raise

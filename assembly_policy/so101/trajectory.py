@@ -86,6 +86,7 @@ class Trajectory:
                       initial_time=self.start_time, final_time=float(self.d.time),
                       max_clock_step_error_s=self.max_clock_error,
                       max_contact_penetration_m=float(depths.max()), deepest_pair=[geom_name(g) for g in deepest],
+                      contact_penetration_metric='max(0, -mjContact.dist); not a bound on maximum triangle-mesh overlap',
                       warnings=(np.asarray(self.d.warning.number)-self.warning_start).tolist(),
                       model_sha256=model_hash,
                       plugin_sha256=self.plugin_hashes,
