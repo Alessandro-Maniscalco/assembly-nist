@@ -1,5 +1,7 @@
 # AssembleNIST: Assembly Policy Learning in MuJoCo
 
+> **SO101 research fork:** This branch adapts upstream commit `eb5d15e` to two clamped SO101 arms assembling Hiwonder parts. See [SO101 setup, validation and run instructions](docs/SO101.md). Full SO101 assembly is not solved; the results, pretrained policies and Franka/NIST instructions below belong to the upstream project.
+
 ![MuJoCo](https://img.shields.io/badge/MuJoCo-3.x-1f6feb) ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c) ![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab)
 
 By **[Tao Sun](https://taosun.io) | Stanford University**

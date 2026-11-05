@@ -33,7 +33,8 @@ def _pack(o, proto, ids=None):
     sel = (lambda x: x) if ids is None else (lambda x: x[ids])
     d = {k: sel(o[k]) for k in OBS_KEYS if k != "proprio"}
     if proto >= 2:
-        d["frame"] = np.ascontiguousarray(sel(o["proprio"])[:, -PROPRIO_DIM:])
+        frame_dim = o["proprio"].shape[1] // HISTORY
+        d["frame"] = np.ascontiguousarray(sel(o["proprio"])[:, -frame_dim:])
     else:
         d["proprio"] = sel(o["proprio"])
     return d
@@ -118,7 +119,7 @@ class RemoteVecEnv:
         self.slice_of = {}                         # connection -> slice
         self.hosts = [""] * n_conns
         self.alive = np.zeros(n_envs, bool)
-        self.hist = np.zeros((n_envs, HISTORY, PROPRIO_DIM), np.float32)   # protocol-2 proprio histories
+        self.hist = np.zeros((n_envs, HISTORY, getattr(ecfg, "proprio_dim", PROPRIO_DIM)), np.float32)
         self.pending = {}                          # connection -> slice, waiting for its hello/obs
         self.sel = selectors.DefaultSelector()     # persistent poller over active connections
         self._obs = None
@@ -442,9 +443,12 @@ def _serve(conn, nthread):
         init = conn.recv()
     except (EOFError, OSError) as e:
         raise _NoSlice() from e
-    ecfg = EnvConfig(**{**init["ecfg"], "nthread": nthread})
+    config_type, env_type = EnvConfig, BatchedAssemblyEnv
+    if init["ecfg"].get("suite") == "so101":
+        from ..so101.env import EnvConfig as config_type, BatchedAssemblyEnv as env_type
+    ecfg = config_type(**{**init["ecfg"], "nthread": nthread})
     n = len(init["state"])
-    env = BatchedAssemblyEnv(init["tasks"], np.zeros(n, dtype=np.int64), ecfg)
+    env = env_type(init["tasks"], np.zeros(n, dtype=np.int64), ecfg)
     env.set_states(np.arange(n), init["state"], init["task"])
     env.t[:] = init["t"]
     nxt_s, nxt_t = init["next_state"].copy(), init["next_task"].copy()

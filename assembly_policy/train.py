@@ -36,6 +36,8 @@ OBS = ("prop", "task", "tcp_p", "tcp_R", "part_p", "part_q", "finger")
 def parse(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--init-policy", help="SO101 weights-only continuation into a fresh run; optimizer and SGS restart")
+    ap.add_argument("--suite", choices=["nist", "so101"], default="nist")
     ap.add_argument("--tasks", default="all20", help="all20 (default), or a task set / '+'-separated list")
     ap.add_argument("--bank-dir", default=str(BANK_DIR))
     ap.add_argument("--envs", type=int, default=8192)
@@ -106,36 +108,61 @@ def load_banks(tasks, bank_dir, per_family=0):
 class Trainer:
     def __init__(self, a):
         self.a = a
+        self.backend = None
+        point_tables, config_type, scales = PointTables, EnvConfig, parse_scales
+        resolve = resolve_tasks
+        self.proprio_dim, self.act_dim = PROPRIO_DIM, 8
+        self.arm_actions, self.prev_start = np.arange(7), 22
+        if getattr(a, "suite", "nist") == "so101":
+            from .so101 import env as backend
+            from .so101.obs import PointTables as SO101PointTables
+            self.backend = backend
+            point_tables, config_type, scales = SO101PointTables, backend.EnvConfig, backend.parse_scales
+            resolve = backend.resolve_tasks
+            self.proprio_dim, self.act_dim = backend.PROPRIO_DIM, backend.ACT_DIM
+            self.arm_actions, self.prev_start = backend.ARM_ACTIONS, backend.PREVIOUS_ACTION_START
+            if a.bank_dir == str(BANK_DIR): a.bank_dir = str(ROOT / "data/so101/banks")
+            from .so101.resets import check_bank
+            check_bank(a.bank_dir)
         self.dev = torch.device(a.device)
-        self.tasks = resolve_tasks(a.tasks)
+        self.tasks = resolve(a.tasks)
         self.run = Path(a.run_dir)
         self.run.mkdir(parents=True, exist_ok=True)
         self.bank_S, self.bank_T, self.bank_F = load_banks(self.tasks, a.bank_dir, a.bank_per_family)
         print(f"[train] {len(self.tasks)} tasks, {len(self.bank_S)} reset-bank entries", flush=True)
         np.random.seed(a.seed); torch.manual_seed(a.seed)
         self.sampler = ResetSampler(len(self.bank_S), a.sampler, a.eps_q, a.history, seed=a.seed)
-        self.pts = PointTables(self.tasks, a.n_part, a.n_fix, a.n_grip, device=self.dev)
-        self.model = ActorCritic(self.pts.n_pts, init_std=a.init_std, max_std=a.max_std, min_std=a.min_std).to(self.dev)
+        self.pts = point_tables(self.tasks, a.n_part, a.n_fix, a.n_grip, device=self.dev)
+        self.model = ActorCritic(self.pts.n_pts, proprio_dim=HISTORY*self.proprio_dim, act_dim=self.act_dim,
+                                init_std=a.init_std, max_std=a.max_std, min_std=a.min_std).to(self.dev)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=a.lr)    # one optimizer for actor and critic
         self.lr, self.it, self.transitions = a.lr, 0, 0
         self._children = []                                             # background evaluations
-        self.ecfg = EnvConfig(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=parse_scales(a.action_scale_joints))
+        self.ecfg = config_type(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=scales(a.action_scale_joints))
         self.args = dict(vars(a), env={k: v for k, v in dataclasses.asdict(self.ecfg).items() if k != "nthread"})
-        (self.run / "config.json").write_text(json.dumps(self.args, indent=1))
+        if self.backend:
+            from .so101.resets import signature, pooled_signature
+            self.args['model_signature'] = signature()
+            self.args['bank_signature']=pooled_signature((self.bank_S,self.bank_T,self.bank_F))
         self._maybe_resume()
+        (self.run / "config.json").write_text(json.dumps(self.args, indent=1))
         horizon = int(round(self.ecfg.horizon_s / self.ecfg.control_dt))
         t0 = np.random.default_rng(a.seed + 7).integers(0, horizon, a.envs)   # desynchronized episode clocks
         if a.remote_workers > 0:
             from .rl.remote import RemoteVecEnv
-            fine = set(self.ecfg.fine_families.split("+"))
-            cost = [(FINE_STEP_COST if TASKS[t].family in fine and TASKS[t].family in FINE_STEP_COST else STEP_COST)
-                    [TASKS[t].family] for t in self.tasks]
+            if self.backend is None:
+                fine = set(self.ecfg.fine_families.split("+"))
+                cost = [(FINE_STEP_COST if TASKS[t].family in fine and TASKS[t].family in FINE_STEP_COST else STEP_COST)
+                        [TASKS[t].family] for t in self.tasks]
+            else:
+                cost = np.ones(len(self.tasks))  # remote scheduler learns observed task costs
             self.env = RemoteVecEnv(self.run, self.tasks, a.envs, self.ecfg, self._provider, a.remote_workers, t0,
                                     accept_timeout=a.accept_timeout, min_frac=a.min_conn_frac, task_cost=cost,
                                     entry_key=self.bank_T * len(FAMILIES) + self.bank_F,
                                     n_keys=len(self.tasks) * len(FAMILIES))
         else:
-            self.env = LocalVecEnv(self.tasks, a.envs, self.ecfg, self._provider, t0)
+            self.env = LocalVecEnv(self.tasks, a.envs, self.ecfg, self._provider, t0,
+                                  env_type=None if self.backend is None else self.backend.BatchedAssemblyEnv)
 
     # ------------------------------------------------------------- helpers
     def _provider(self, k, finished=None, outcomes=None):
@@ -172,15 +199,32 @@ class Trainer:
         out.parent.mkdir(parents=True, exist_ok=True)
         log = open(out.with_suffix(".log"), "w")
         self._children.append(subprocess.Popen(
-            [sys.executable, "-m", "assembly_policy.evaluate", "--policy", str(ck), "--tasks", "+".join(self.tasks),
+            [sys.executable, "-m", "assembly_policy.so101.evaluate" if self.backend else "assembly_policy.evaluate",
+             "--policy", str(ck), "--tasks", "+".join(self.tasks),
              "--bank-dir", str(self.a.bank_dir), "--out", str(out), "--nthread", str(self.a.eval_threads)],
             stdout=log, stderr=subprocess.STDOUT, cwd=str(ROOT), env={**os.environ, "OMP_NUM_THREADS": "2"}))
 
     def _maybe_resume(self):
         p = self.run / "checkpoint.pt"
         if not p.exists():
+            initial=getattr(self.a,'init_policy',None)
+            if initial:
+                if self.backend is None:raise ValueError('--init-policy currently requires --suite so101')
+                d=torch.load(initial,map_location=self.dev,weights_only=False)
+                if d.get('args',{}).get('model_signature')!=self.args['model_signature']:
+                    raise ValueError('Warm-start policy uses different physics; explicit separate qualification required')
+                if self.backend.resolve_tasks(d['args']['tasks'])!=self.tasks:
+                    raise ValueError('Warm-start task order differs')
+                self.model.load_state_dict(d['model']);self.model.project_()
+                self.args['parent_policy']={'path':str(Path(initial).resolve()),'iteration':d.get('it'),
+                                            'transitions':d.get('transitions'),'optimizer_reused':False,'sampler_reused':False}
+                print('[train] weights-only continuation; fresh optimizer and SGS',flush=True)
             return
         d = torch.load(p, map_location=self.dev, weights_only=False)
+        if self.backend and (d.get('args', {}).get('model_signature') != self.args['model_signature'] or
+                             d.get('args', {}).get('bank_signature') != self.args['bank_signature'] or
+                             self.backend.resolve_tasks(d['args']['tasks']) != self.tasks):
+            raise ValueError('SO101 checkpoint assets/reset bank/task order differ; start a separate run directory')
         self.model.load_state_dict(d["model"])
         self.opt.load_state_dict(d["opt"])
         self.model.project_()
@@ -203,7 +247,7 @@ class Trainer:
         rate = a.action_rate_coef if self.it >= a.action_rate_start else 0.0
         buf = {k: [] for k in OBS}
         acts, logps, vals, rews, dones, mus, valids = [], [], [], [], [], [], []
-        st = dict(done=0, success=0, safety=0, ep_len=[], fam_n=np.zeros(len(FAMILIES)), fam_s=np.zeros(len(FAMILIES)),
+        st = dict(done=0, success=0, safety=0, unstable=0, ep_len=[], fam_n=np.zeros(len(FAMILIES)), fam_s=np.zeros(len(FAMILIES)),
                   task_n=np.zeros(len(self.tasks)), task_s=np.zeros(len(self.tasks)), sim=0.0)
         self.model.eval()
         for t in range(T):
@@ -216,13 +260,14 @@ class Trainer:
                 act = dist.sample()
                 logp = dist.log_prob(act).sum(-1)
                 v = self.model.value(pts, ob["prop"])
-                # smoothness term; the previous arm action is the newest proprio frame's columns 22..28
-                prev = ob["prop"].view(N, HISTORY, PROPRIO_DIM)[:, -1, 22:29]
-                rate_pen = (rate * ((act[:, :7] - prev) ** 2).sum(1)).cpu().numpy()
+                prev = ob["prop"].view(N, HISTORY, self.proprio_dim)[:, -1,
+                      self.prev_start:self.prev_start+self.act_dim][:, self.arm_actions]
+                rate_pen = (rate * ((act[:, self.arm_actions] - prev) ** 2).sum(1)).cpu().numpy()
             t1 = time.perf_counter()
             r, done, info, final_obs, finished = self.env.step(act.cpu().numpy())
             st["sim"] += time.perf_counter() - t1
             valid = info["valid"]
+            st['unstable'] += int(np.sum(info['unstable'] & valid))
             r = r.astype(np.float32) - np.where(valid, rate_pen, 0.0).astype(np.float32)
             ids = np.nonzero(done)[0]
             if len(ids) and info["timeout"][ids].any():   # time-outs bootstrap from the final state's value
@@ -324,14 +369,19 @@ class Trainer:
                 raise SystemExit(3)
             t1 = time.time()
             losses = self.update(batch)
+            if self.backend and (not all(np.isfinite(v) for v in losses.values()) or
+                                 not all(bool(torch.isfinite(p).all()) for p in self.model.parameters())):
+                raise FloatingPointError('Nonfinite SO101 PPO update; keep the previous checkpoint')
             self.it += 1
             n_ep = max(st["done"], 1)
             rec = dict(it=self.it, transitions=self.transitions, fps=a.envs * a.steps / (time.time() - t0),
-                       t_sim=st["sim"], t_update=time.time() - t1, lr=self.lr, std=float(self.model.std().mean()),
+                       t_sim=st["sim"], t_update=time.time() - t1, lr=self.lr, std=float(self.model.std().detach().mean()),
                        episodes=st["done"], success=st["success"] / n_ep, safety=st["safety"] / n_ep,
+                       unstable=st['unstable'], sampler_effective_fraction=self.sampler.entropy_ratio(),
                        ep_len=float(np.mean(st["ep_len"])) if st["ep_len"] else 0.0,
                        fam_success={f: (st["fam_s"][i] / st["fam_n"][i] if st["fam_n"][i] else None) for i, f in enumerate(FAMILIES)},
                        task_success={t: (st["task_s"][i] / st["task_n"][i] if st["task_n"][i] else None) for i, t in enumerate(self.tasks)},
+                       task_episodes={t: int(st['task_n'][i]) for i,t in enumerate(self.tasks)},
                        visited=float((self.sampler.cnt > 0).mean()), **losses)
             log_f.write(json.dumps(rec) + "\n"); log_f.flush()
             if self.it % 10 == 0 or self.it <= 3:
@@ -341,14 +391,22 @@ class Trainer:
                       f"std={rec['std']:.3f} sim={st['sim']:.1f}s update={rec['t_update']:.1f}s", flush=True)
             if self.it % a.save_every == 0 or self.it == a.iters:
                 self.save(keep=self.it % a.keep_every == 0 or self.it == a.iters)
-            if (time.time() - t_start) / 3600 > a.max_hours:
+            if (time.time() - t_start) / 3600 > a.max_hours or getattr(self, 'stop_requested', False):
                 self.save()
                 break
 
 
 def main():
+    import signal
     tr = Trainer(parse())
-    tr.train()
+    tr.stop_requested = False
+    signal.signal(signal.SIGTERM, lambda *_: setattr(tr, 'stop_requested', True))
+    try:
+        tr.train()
+    except KeyboardInterrupt:
+        tr.save()
+    finally:
+        tr.env.close()
     for p in tr._children:    # let the background evaluations of the last kept checkpoints finish
         p.wait()
 

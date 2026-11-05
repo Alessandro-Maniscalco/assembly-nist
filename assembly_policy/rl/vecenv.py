@@ -21,11 +21,11 @@ INFO_KEYS = ("success", "safety", "timeout", "d_asm", "cost", "unstable")
 
 
 class LocalVecEnv:
-    def __init__(self, task_names, n_envs, ecfg: EnvConfig, provider, t0=None):
+    def __init__(self, task_names, n_envs, ecfg: EnvConfig, provider, t0=None, env_type=None):
         # provider(k, finished_entries=None, outcomes=None) -> (entries, states, tasks); it records the
         # finished episodes' outcomes in the sampler before drawing k new entries.
         self.provider = provider
-        self.env = BatchedAssemblyEnv(task_names, np.zeros(n_envs, dtype=np.int64), ecfg)
+        self.env = (env_type or BatchedAssemblyEnv)(task_names, np.zeros(n_envs, dtype=np.int64), ecfg)
         self.N, self.horizon = n_envs, self.env.horizon
         e, s, t = provider(n_envs)
         self.entry = e

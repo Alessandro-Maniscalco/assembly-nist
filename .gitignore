@@ -7,3 +7,7 @@ logs/
 *.mp4
 !docs/videos/*.mp4
 MUJOCO_LOG.TXT
+assets_local/
+artifacts_local/
+.venv/
+*.egg-info/

@@ -173,9 +173,14 @@ std::mutex g_mu;
 std::unordered_map<int, std::unique_ptr<Grid>> g_grids;
 
 const Grid* get_grid(int id) {
+  // Grids are immutable and owned by g_grids for the library lifetime. Cache
+  // pointers per rollout thread so repeated distance queries need no shared lock.
+  thread_local std::unordered_map<int, const Grid*> cached;
+  auto local = cached.find(id);
+  if (local != cached.end()) return local->second;
   std::lock_guard<std::mutex> lock(g_mu);
   auto it = g_grids.find(id);
-  if (it != g_grids.end()) return it->second.get();
+  if (it != g_grids.end()) return cached[id] = it->second.get();
   const char* env = std::getenv("ASSEMBLENIST_SDF_DIR");
   std::string path = std::string(env && *env ? env : ASSEMBLENIST_SDF_DIR) + "/grid_" + std::to_string(id) + ".bin";
   std::ifstream f(path, std::ios::binary);
@@ -190,7 +195,7 @@ const Grid* get_grid(int id) {
   }
   const Grid* ptr = g.get();
   g_grids[id] = std::move(g);
-  return ptr;
+  return cached[id] = ptr;
 }
 
 inline float h2f(uint16_t x) { return _cvtsh_ss(x); }

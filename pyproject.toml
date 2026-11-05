@@ -10,5 +10,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = ["mujoco>=3.3", "torch>=2.1", "numpy", "scipy", "imageio[ffmpeg]", "pillow", "matplotlib"]
 
+[project.optional-dependencies]
+so101 = ["mujoco==3.17.0", "rhino3dm==8.35.0", "trimesh==5.2.0", "open3d==0.20.0", "libigl==2.6.3", "psutil>=5.9"]
+
 [tool.setuptools.packages.find]
 include = ["assembly_policy*"]
