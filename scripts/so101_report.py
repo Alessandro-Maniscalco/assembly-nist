@@ -57,7 +57,7 @@ def main():
             safety_terminations=int(unsafe.sum()),numerical_failures=sum(r['unstable'] for r in records),
             median_transitions_per_second=float(np.median([r['fps'] for r in records])),
             parent_policy=parent))
-        for report in path.glob('reviews/*/evaluation.json'):
+        for report in [*path.glob('reviews/*/evaluation.json'),*path.glob('final_review/evaluation.json')]:
             r=json.loads(report.read_text())
             evaluations.append(dict(phase=phase+1,report=str(report.resolve()),mtime=report.stat().st_mtime,
                 successes=sum(t['successes'] for t in r['tasks'].values()),

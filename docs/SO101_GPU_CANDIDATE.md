@@ -2,7 +2,7 @@
 
 **Goal:** Qualify isolated GPU collision variants while preserving native reference evidence and the original PPO/SimBa/SGS.
 
-**Status, 2026-11-05:** The whole-helper SDF backend passes geometry, tool, environment and a five-update 128-world PPO pilot at the explicit float32 tolerance 1e-6. It is selected for the bounded overnight run; native remains the default/reference. Earlier Menagerie, raw-helper-mesh and 1e-8 solver failures are preserved below. No result establishes learned loose-part assembly or hardware transfer.
+**Status, 2026-11-05:** The whole-helper SDF backend passes geometry, tool, environment and actual 128-world PPO checks at explicit float32 tolerance 1e-6. The bounded runs are stopped; native remains the default/reference. The final threaded-endpoint experiment reaches a median 93.61 transitions/s over 27 updates, but its final native loose check is 0/10, with eight safety stops. Earlier collision, solver and behavioral failures are preserved below; see [final status](SO101_STATUS.md).
 
 ## Candidate and explicit deviations
 
@@ -315,3 +315,10 @@ This is an endpoint-only speedup until a complete learner is timed. Initial
 profiling exceeded its strict 3 GiB limit by 55.6 MiB; the separately bounded
 production qualification peaks at 3.12 GiB under a 4 GiB limit, with ample host
 headroom. Reports remain under `artifacts_local/refresh_profile/`.
+
+The subsequent complete learner trial measures **93.61 transitions/s median**
+over 27 updates / 110,592 transitions, with no numerical failure or restart,
+and stops at 14:45:35 UTC. The prior GPU run's median was 59.97 transitions/s;
+these runs also differ in checkpoint, objective and sampled states, so the
+ratio is not a controlled causal speedup measurement. The earlier frozen
+endpoint tests provide the exact matched comparison.

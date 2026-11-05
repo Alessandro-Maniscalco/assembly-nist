@@ -2,7 +2,7 @@
 
 Goal: record verified behavior, remaining failures and the next physical setup without conflating scripted motion, prepared-state learning and loose-part assembly.
 
-**Full assembly from loose parts remains unlearned.** The fresh fork, native simulation, optional GPU learner, checkpoints and independent evaluation are operational. No physical robot was operated.
+**Full assembly from loose parts remains unlearned.** The fresh fork, native simulation, optional GPU learner, checkpoints and independent evaluation are operational. Five main phases completed **905,216 training transitions**; all are checkpointed and stopped. The final GPU run stopped at **09:45:35 EST on November 5** (14:45:35 UTC), with no forced kill or numerical failure. No physical robot was operated.
 
 ## Verified results
 
@@ -10,7 +10,7 @@ Goal: record verified behavior, remaining failures and the next physical setup w
 | --- | --- |
 | Learning recipe | Upstream PPO update, SimBa networks and SGS equations remain unchanged. SO101 actions/observations, task scoring and the small-bank sampling floor are explicit adaptations. |
 | GPU run | Passing five-update pilot followed by 68 total updates / 278,528 transitions. It stopped cleanly at 14:09 UTC after the independent behavioral regression below; no numerical failures, forced kill or restart. |
-| Separate corrective trial | Starts from frozen review iteration 60 with fresh optimizer/SGS and safety penalty 1.0. Three pilot updates / 12,288 transitions pass at 80.6–82.2 transitions/s with no numerical errors. The timed continuation and independent evaluation are pending completion; safety improvement is not established. |
+| Separate corrective trial | Starts from frozen review iteration 60 with fresh optimizer/SGS and safety penalty 1.0. Final checkpoint: 27 updates / 110,592 transitions, median 93.61 transitions/s, no numerical failures/restarts. Final native evaluation: **0/10 successes, 8 safety stops, 2 timeouts**. Earlier iteration 10 had 9 safety stops. These small diagnostics do not establish penalty efficacy or robust safety. |
 | GPU physics | Whole-helper SDF geometry, physical tool replay and environment/reset/sensor checks pass. GPU tolerance is explicitly 1e-6; canonical native tolerance remains 1e-8. Exact GPU reproducibility is unqualified. |
 | Native transfer of GPU checkpoint | Iteration 20: 12/12 mean and 11/12 sampled successes on twelve held-out prepared starts. One sampled motor episode exceeds the base–table contact-depth guard: 0.439483 mm versus 0.400 mm. No replacement trials. |
 | Release audit | All 23 current holdout successes have no hand/tool contacts over their final 800 native physics steps. The earlier native reference was 24/24 under the control-sampled rule, with two brief contacts in one fine-step window. |
@@ -38,13 +38,26 @@ The [fit audit](SO101_FIT.md) finds the same 31.8 mm base cavity in both vendor 
 
 Use [setup/run instructions](SO101.md), [tool evidence](SO101_TOOL.md) and [GPU qualification](SO101_GPU_CANDIDATE.md). Local evidence is deliberately excluded from Git:
 
-- `runs/so101_gpu_tol1e6_20261105/`: live health, supervisor, checkpoints and scheduled reviews.
+- `runs/so101_gpu_tol1e6_20261105/`: recorded health, supervisor, checkpoints and scheduled reviews.
 - `runs/so101_safety_penalty_20261105/`: separate corrective trial; its parent is the frozen review, not the later iteration-68 final checkpoint.
+- `runs/so101_safety_penalty_20261105/final_review/`: final checkpoint hash, fixed-cohort native evaluation and completed-process receipt.
 - `artifacts_local/overnight_progress.{png,json}`: phase-separated learning curves.
 - `artifacts_local/gpu_native_holdout/handoff.json`: fixed native-transfer results and failure replay.
 - `artifacts_local/curriculum_progress/handoff.json`: actual start distances, sampler coverage and failed insertion probes.
 - `artifacts_local/prepared_screw/handoff.json`: physical coupling and unresolved failures.
 
 The motor replay's side-push load peaks at 11.964 N. Pickup produces opposing jaw-normal loads of about 57 N per jaw, with only 0.50 N net motor load at the scalar peak; the compression itself remains uncalibrated. The 70 s demonstration also exceeds the current 15 s learning horizon. A curriculum and time budget for the selected layout need qualification; the demonstration does not prove that this policy can complete the task within 15 s.
+
+Reproduce the complete scripted motor replay from its hashed local recipe:
+
+```bash
+.venv/bin/python -m assembly_policy.so101.replay \
+  artifacts_local/actual_loose_motor_chain.json --scope loose \
+  --out artifacts_local/motor_review
+MUJOCO_GL=egl .venv/bin/python -m assembly_policy.so101.trajectory \
+  artifacts_local/motor_review.npz
+```
+
+The selected archive's relocated base/clamp collision bounds also pass 24 direct-distance/contact checks, with no old-position ghost contacts. Recomputing model constants changes only roundoff (≤1.42e−14), not body/geometry/BVH arrays. Reports are `artifacts_local/mount_broadphase_audit.json` and `mount_constants_audit.json`.
 
 Next gates are randomized motor robustness, stable tool reaction-torque/bit alignment, screw release, and task-specific pickup/insertion curricula. Simulator observations use exact body poses and CAD point samples; real perception and calibration are not implemented. No hardware-transfer claim follows from these simulation results.
