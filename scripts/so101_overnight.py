@@ -60,6 +60,8 @@ def main():
     ap.add_argument('--bank-dir',type=Path,default=ROOT/'data/so101/banks')
     ap.add_argument('--init-policy',type=Path)
     ap.add_argument('--preflight',type=Path,default=ROOT/'artifacts_local/preflight.json')
+    ap.add_argument('--max-contact-depth',type=float,default=None)
+    ap.add_argument('--stability',choices=['velocity','pose'],default='velocity')
     ap.add_argument('--review-seconds',type=int,default=7200)
     ap.add_argument('--first-review-utc',help='Optional first review ISO8601 time; subsequent reviews use --review-seconds')
     ap.add_argument('--sampler-floor-mass',type=float,default=1.6,
@@ -76,7 +78,9 @@ def main():
     eps_q=a.sampler_floor_mass/bank_count
     preflight=json.loads(a.preflight.read_text())
     if (preflight['model_signature']!=signature() or not all(preflight['checks'].values()) or
-        preflight.get('bank_directory_signature')!=directory_signature(a.bank_dir)):
+        preflight.get('bank_directory_signature')!=directory_signature(a.bank_dir) or
+        preflight.get('max_contact_depth')!=a.max_contact_depth or
+        preflight.get('stability_metric','velocity')!=a.stability):
         raise ValueError('A passing preflight for the current model and exact bank is required')
     environment={**os.environ,'OMP_NUM_THREADS':'1','OPENBLAS_NUM_THREADS':'1','MUJOCO_GL':'egl'}
     process=None;restarts=0;reviews=0
@@ -113,6 +117,8 @@ def main():
                          '--eps-q',str(eps_q),
                          '--no-eval','--max-hours',str(max(.01,(end-time.time())/3600))]
                 if a.init_policy:command+=['--init-policy',str(a.init_policy.resolve())]
+                command+=['--so101-stability',a.stability]
+                if a.max_contact_depth is not None:command+=['--so101-max-contact-depth',str(a.max_contact_depth)]
                 log=(run/f'trainer_attempt_{restarts}.log').open('a')
                 process=subprocess.Popen(command,cwd=ROOT,env=environment,stdin=subprocess.DEVNULL,
                                          stdout=log,stderr=subprocess.STDOUT,start_new_session=True)

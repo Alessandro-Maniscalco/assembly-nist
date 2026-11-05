@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -54,21 +55,23 @@ def pooled_signature(arrays):
     return digest.hexdigest()
 
 
-def add_motor_trajectories(directory, paths, count=32):
+def add_task_trajectories(directory, paths, count=32, task='motor'):
     """Extract verified held/approach starts from this model's actual trajectories.
 
     Failed assembly attempts are valid coverage. No evaluation state comes from
     these traces. Only bilaterally held, nonterminal states are accepted.
     """
+    if task not in TASK_NAMES:raise ValueError(f'Unknown task {task}')
     m=model();binary=np.empty(mujoco.mj_sizeModel(m),np.uint8);mujoco.mj_saveModel(m,buffer=binary)
     model_hash=hashlib.sha256(binary.tobytes()).hexdigest();d=mujoco.MjData(m)
     from .env import BatchedAssemblyEnv,EnvConfig
-    env=BatchedAssemblyEnv(['motor'],[0],EnvConfig(nthread=1))
+    env=BatchedAssemblyEnv([task],[0],EnvConfig(nthread=1))
     families={1:[],2:[],3:[],4:[]};sources=[]
-    motor=m.body('motor').id
-    fixed=m.body('right_gripper').id;moving=m.body('right_moving_jaw_so101_v1').id
+    active=m.body(task).id
+    hands=[{m.body(side+'_gripper').id,m.body(side+'_moving_jaw_so101_v1').id} for side in ('left','right')]
     for path in paths:
         path=Path(path);record=json.loads(path.with_suffix('.json').read_text())
+        if record.get('task',task)!=task:raise ValueError(f'{path}: wrong task')
         if record['model_sha256']!=model_hash:raise ValueError(f'{path}: trajectory uses a different model')
         if any(record['warnings']) or record['max_clock_step_error_s']>1e-8:raise ValueError(f'{path}: invalid physics')
         for name,expected in record['plugin_sha256'].items():
@@ -79,17 +82,20 @@ def add_motor_trajectories(directory, paths, count=32):
         sources.append({'file':path.name,'model_sha256':model_hash})
         prepared=record.get('prepared_sgs_reset',False)
         if prepared and not record.get('held_reset_qualified'):raise ValueError(f'{path}: unqualified prepared hold')
-        indices=([record['held_state_index']-240+j*80 for j in range(4)] if prepared
+        held_indices=record.get('held_state_indices',record.get('qualified_state_indices',[record.get('held_state_index')]))
+        indices=([index-240+j*80 for index in held_indices for j in range(4)] if prepared
                  else range(0,len(z['states']),80))
         for k in indices:
             s=z['states'][k]
             if not np.isfinite(s).all() or z['penetration'][k]>.0004:continue
             mujoco.mj_setState(m,d,s,STATE_SPEC);d.ctrl[:]=z['controls'][k];mujoco.mj_forward(m,d)
             touched=set()
-            for c in d.contact:
+            for contact_id,c in enumerate(d.contact):
                 pair=m.geom_bodyid[c.geom]
-                if motor in pair:touched.update(int(b) for b in pair if b!=motor)
-            if not {fixed,moving}.issubset(touched):continue
+                if active in pair:
+                    force=np.zeros(6);mujoco.mj_contactForce(m,d,contact_id,force)
+                    if force[0]>.001:touched.update(int(b) for b in pair if b!=active)
+            if not any(hand<=touched for hand in hands):continue
             env.set_states([0],s[None]);distance=float(env.assembly_distance()[0])
             # Geometrically seated but bilaterally held is NOT terminal: the
             # task requires release and stable retention. These are useful near starts.
@@ -101,7 +107,7 @@ def add_motor_trajectories(directory, paths, count=32):
             else:continue
             families[family].append(s.copy())
     env.close();rng=np.random.default_rng(7301)
-    p=Path(directory)/'motor_train.npz';old=np.load(p)
+    p=Path(directory)/f'{task}_train.npz';old=np.load(p)
     states=[old['states']];family=[old['family']];seeds=[old['seed']];coverage={}
     for f,rows in families.items():
         if not rows:continue
@@ -110,7 +116,11 @@ def add_motor_trajectories(directory, paths, count=32):
         start=int(np.sum(old['family']==f))
         seeds.append(-100000*f-start-np.arange(len(chosen)));coverage[str(f)]=len(chosen)
     np.savez_compressed(p,states=np.concatenate(states),family=np.concatenate(family),seed=np.concatenate(seeds))
-    return {'sources':sources,'motor_additional_families':coverage,'maximum_per_family':count}
+    return {'sources':sources,task+'_additional_families':coverage,'maximum_per_family':count}
+
+
+def add_motor_trajectories(directory,paths,count=32):
+    return add_task_trajectories(directory,paths,count,'motor')
 
 
 def reset(m,task,seed):
@@ -165,7 +175,28 @@ def main():
     ap.add_argument('--workers',type=int,default=2)
     ap.add_argument('--tasks',default='+'.join(TASK_NAMES))
     ap.add_argument('--trajectory',type=Path,action='append',default=[])
-    a=ap.parse_args();a.out.mkdir(parents=True,exist_ok=True)
+    ap.add_argument('--extend-from',type=Path,help='Copy an immutable bank and add qualified trajectories in a new directory')
+    a=ap.parse_args()
+    if a.out.exists() and any(a.out.iterdir()):raise ValueError('Output bank is not empty; choose a new versioned directory')
+    a.out.mkdir(parents=True,exist_ok=True)
+    if a.extend_from:
+        check_bank(a.extend_from);shutil.copytree(a.extend_from,a.out,dirs_exist_ok=True)
+        report=json.loads((a.out/'manifest.json').read_text())
+        report['parent_directory_signature']=directory_signature(a.extend_from)
+        groups={}
+        for path in a.trajectory:
+            task=json.loads(path.with_suffix('.json').read_text()).get('task','motor')
+            groups.setdefault(task,[]).append(path)
+        report['added_trajectory_coverage']={task:add_task_trajectories(a.out,paths,a.count,task) for task,paths in groups.items()}
+        report['coverage_note']='Versioned extension with loaded bilateral held states; prepared starts are not loose-assembly demonstrations. Independent EVAL archives are unchanged.'
+        for task in TASK_NAMES:
+            with np.load(a.out/f'{task}_train.npz') as z:
+                ids,counts=np.unique(z['family'],return_counts=True)
+                report['tasks'][task]['train']['entries']=len(z['states'])
+                report['tasks'][task]['train']['family_counts']={str(int(k)):int(v) for k,v in zip(ids,counts)}
+        (a.out/'manifest.json').write_text(json.dumps(report,indent=2)+'\n')
+        print(json.dumps(report['added_trajectory_coverage'],indent=2),flush=True)
+        return
     report={'model_signature':signature(),'randomization':{'xy_m':.008,'yaw_deg':8},
                       'families':['loose'],'coverage_note':'Pilot banks; held and near-insertion curricula are not generated.',
                       'tasks':{}}
@@ -188,8 +219,12 @@ def main():
                 print(task,split,report['tasks'][task][split],flush=True)
     if a.trajectory:
         (a.out/'manifest.json').write_text(json.dumps(report,indent=2)+'\n')
-        report['trajectory_coverage']=add_motor_trajectories(a.out,a.trajectory,a.count)
-        report['coverage_note']='Independent loose-table banks for all five tasks; motor held/near families extracted from measured native trajectories.'
+        groups={}
+        for path in a.trajectory:
+            task=json.loads(path.with_suffix('.json').read_text()).get('task','motor')
+            groups.setdefault(task,[]).append(path)
+        report['trajectory_coverage']={task:add_task_trajectories(a.out,paths,a.count,task) for task,paths in groups.items()}
+        report['coverage_note']='Independent loose-table banks for all five tasks; additional loaded held/near families from measured native trajectories. Prepared starts do not demonstrate loose assembly.'
     (a.out/'manifest.json').write_text(json.dumps(report,indent=2)+'\n')
 
 

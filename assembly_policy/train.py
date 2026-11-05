@@ -38,6 +38,8 @@ def parse(argv=None):
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--init-policy", help="SO101 weights-only continuation into a fresh run; optimizer and SGS restart")
     ap.add_argument("--suite", choices=["nist", "so101"], default="nist")
+    ap.add_argument("--so101-max-contact-depth",type=float,default=None)
+    ap.add_argument("--so101-stability",choices=['velocity','pose'],default='velocity')
     ap.add_argument("--tasks", default="all20", help="all20 (default), or a task set / '+'-separated list")
     ap.add_argument("--bank-dir", default=str(BANK_DIR))
     ap.add_argument("--envs", type=int, default=8192)
@@ -138,7 +140,8 @@ class Trainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=a.lr)    # one optimizer for actor and critic
         self.lr, self.it, self.transitions = a.lr, 0, 0
         self._children = []                                             # background evaluations
-        self.ecfg = config_type(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=scales(a.action_scale_joints))
+        extra={} if self.backend is None else dict(max_contact_depth=a.so101_max_contact_depth,stability_metric=a.so101_stability)
+        self.ecfg = config_type(nthread=a.nthread, cost_coef=a.cost_coef, action_scale_joints=scales(a.action_scale_joints),**extra)
         self.args = dict(vars(a), env={k: v for k, v in dataclasses.asdict(self.ecfg).items() if k != "nthread"})
         if self.backend:
             from .so101.resets import signature, pooled_signature
@@ -223,8 +226,9 @@ class Trainer:
         d = torch.load(p, map_location=self.dev, weights_only=False)
         if self.backend and (d.get('args', {}).get('model_signature') != self.args['model_signature'] or
                              d.get('args', {}).get('bank_signature') != self.args['bank_signature'] or
-                             self.backend.resolve_tasks(d['args']['tasks']) != self.tasks):
-            raise ValueError('SO101 checkpoint assets/reset bank/task order differ; start a separate run directory')
+                             self.backend.resolve_tasks(d['args']['tasks']) != self.tasks or
+                             self.backend.EnvConfig(**{**d['args']['env'],'nthread':self.ecfg.nthread})!=self.ecfg):
+            raise ValueError('SO101 checkpoint assets/reset bank/task order/environment differ; start a separate run directory')
         self.model.load_state_dict(d["model"])
         self.opt.load_state_dict(d["opt"])
         self.model.project_()

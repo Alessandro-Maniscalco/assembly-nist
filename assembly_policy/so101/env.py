@@ -32,6 +32,10 @@ class EnvConfig:
     nthread: int = 4
     success_threshold: float = .001
     proprio_dim: int = PROPRIO_DIM
+    max_contact_depth: float | None = None  # explicit opt-in; old checkpoints retain their semantics
+    stability_metric: str = 'velocity'
+    stable_translation: float = .00025
+    stable_rotation: float = .01
 
 
 def parse_scales(value):
@@ -55,10 +59,13 @@ def resolve_tasks(value):
 class BatchedAssemblyEnv:
     def __init__(self, task_names, task_of_env, ecfg=None):
         self.ecfg = ecfg or EnvConfig()
+        if self.ecfg.stability_metric not in ('velocity','pose'):raise ValueError('Unknown stability metric')
+        if self.ecfg.max_contact_depth is not None and self.ecfg.max_contact_depth<=0:
+            raise ValueError('Contact depth limit must be positive')
         self.task_names = list(task_names)
         self.task = np.array(task_of_env, dtype=np.int64)
         self.N = len(self.task)
-        self.m = model()
+        self.m = model(contact_monitor=self.ecfg.max_contact_depth is not None)
         self.data = [mujoco.MjData(self.m) for _ in range(self.N)]
         self.work = [mujoco.MjData(self.m) for _ in range(max(1,self.ecfg.nthread))]
         self.engine = rollout.Rollout(nthread=self.ecfg.nthread if self.ecfg.nthread > 1 else 0)
@@ -76,6 +83,8 @@ class BatchedAssemblyEnv:
         self.meta = metadata()
         self.origins = origins(self.meta)
         self.stable = np.zeros(self.N,np.int64)
+        self.stable_position = np.zeros((self.N,3))
+        self.stable_quaternion = np.zeros((self.N,4))
         self.frames = None
 
     def close(self):
@@ -149,7 +158,7 @@ class BatchedAssemblyEnv:
         # squeeze/trigger travel. There is no independent tool activation action.
         ctrl[:,[5,11]]=np.clip(self.state[:,[6,12]]+self.ecfg.gripper_scale*a[:,[5,11]],
                               self.m.actuator_ctrlrange[[5,11],0],self.m.actuator_ctrlrange[[5,11],1])
-        trajectory,_=self.engine.rollout(self.m,self.work,self.state,
+        trajectory,sensors=self.engine.rollout(self.m,self.work,self.state,
             np.repeat(ctrl[:,None,:],self.substeps,axis=1),nstep=self.substeps)
         if not np.isfinite(trajectory).all():
             raise FloatingPointError('Nonfinite SO101 physics trajectory; no transition may enter PPO')
@@ -161,31 +170,49 @@ class BatchedAssemblyEnv:
             raise FloatingPointError('MuJoCo reset its simulation clock; stop and inspect physics')
         vel=trajectory[:,:,1+self.m.nq:1+self.m.nq+12]
         safety=(abs(vel)>5.).any((1,2))|unstable
+        if self.ecfg.max_contact_depth is not None:
+            if not np.isfinite(sensors).all():raise FloatingPointError('Nonfinite SO101 contact monitor')
+            # The position-stage sensor reports pre-integration contacts. The
+            # endpoint check below covers the final integrated pose as well.
+            safety |= (-sensors[:,:,0].min(1)>self.ecfg.max_contact_depth)
         # Reject a thrown part before a policy can exploit coarse-step tunneling.
         for start in self.part_v:
             pv=trajectory[:,:,1+self.m.nq+start:1+self.m.nq+start+6]
             safety |= (np.linalg.norm(pv[:,:,:3],axis=2)>1.).any(1)
             safety |= (np.linalg.norm(pv[:,:,3:],axis=2)>30.).any(1)
         self.prev_action=a.copy();self.t+=1;self._refresh()
+        if self.ecfg.max_contact_depth is not None:
+            safety |= np.array([min(d.contact.dist,default=0)<-self.ecfg.max_contact_depth for d in self.data])
         distance=self.assembly_distance()
-        settled=np.zeros(self.N,bool)
+        settled=np.zeros(self.N,bool);positions=[];quaternions=[]
         for i,d in enumerate(self.data):
             name=self.task_names[self.task[i]]
             active_id=self.m.body(name).id
+            positions.append(d.body(name).xpos.copy());quaternions.append(d.body(name).xquat.copy())
             held=any(active_id in self.m.geom_bodyid[c.geom] and any(
                 (self.m.body(int(b)).name.startswith(('left_','right_','driver_')) or
                  self.m.body(int(b)).name=='driver')
                 for b in self.m.geom_bodyid[c.geom]) for c in d.contact)
             v=self.part_v[self.names.index(name)]
             deep=any(c.dist<-.0004 and active_id in self.m.geom_bodyid[c.geom] for c in d.contact)
-            settled[i]=(np.linalg.norm(d.qvel[v:v+3])<.005 and np.linalg.norm(d.qvel[v+3:v+6])<.1 and not held and not deep)
+            slow=(np.linalg.norm(d.qvel[v:v+3])<.005 and np.linalg.norm(d.qvel[v+3:v+6])<.1)
+            settled[i]=not held and not deep and (slow or self.ecfg.stability_metric=='pose')
             if name=='screw':
                 pairs={frozenset((self.m.geom(int(c.geom1)).name,self.m.geom(int(c.geom2)).name)) for c in d.contact}
                 settled[i] &= (frozenset(('male_contact','female_contact')) in pairs and
                                frozenset(('screw_head_contact','horn_contact')) in pairs)
         candidate=(distance<self.ecfg.success_threshold)&settled&~safety
-        self.stable=np.where(candidate,self.stable+1,0)
-        success=self.stable>=round(.4/self.ecfg.control_dt)
+        if self.ecfg.stability_metric=='pose':
+            positions=np.asarray(positions);quaternions=np.asarray(quaternions)
+            close=(np.linalg.norm(positions-self.stable_position,axis=1)<=self.ecfg.stable_translation)
+            close &= abs((quaternions*self.stable_quaternion).sum(1))>=np.cos(self.ecfg.stable_rotation/2)
+            restart=(self.stable==0)|~close
+            self.stable_position[candidate&restart]=positions[candidate&restart]
+            self.stable_quaternion[candidate&restart]=quaternions[candidate&restart]
+            self.stable=np.where(candidate,np.where(restart,1,self.stable+1),0)
+        else:self.stable=np.where(candidate,self.stable+1,0)
+        # Eleven pose samples span ten intervals, i.e. an actual0.4s window.
+        success=self.stable>=round(.4/self.ecfg.control_dt)+(self.ecfg.stability_metric=='pose')
         timeout=(self.t>=self.horizon)&~success&~safety
         torque=np.array([d.actuator_force.copy() for d in self.data])
         limit=self.m.actuator_forcerange[:,1]

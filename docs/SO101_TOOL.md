@@ -50,6 +50,20 @@ displacement starts the spindle.
 
 ## Verified scope and limits
 
+The full, unchanged workcell now completes a scripted table pickup, at least
+40 mm lift, physical button activation, deactivation, table return and release.
+`assembly_policy.so101.tool_demo` uses a mirrored grasp, 2 mm lateral approach
+clearance, a 10 mm higher grasp, short Cartesian waypoints, and 0.4 s spindle
+coast-down. The 40,601-step trace has no warnings and 0.1584 mm peak penetration;
+the spindle reaches 25.92 rad/s and falls to 0.0052 rad/s after coast-down.
+This is one nominal pose. The tool shifts several millimetres within the grasp;
+screw engagement, reaction torque and repeatability still require qualification.
+
+```bash
+.venv/bin/python -m assembly_policy.so101.tool_demo --out artifacts_local/tool_pickup/check
+MUJOCO_GL=egl .venv/bin/python -m assembly_policy.so101.trajectory artifacts_local/tool_pickup/check.npz
+```
+
 The ideal-jaw test retains a free tool OFF at 2.8 N, including a 0.05 N m reaction
 load, and presses ON at 4 N (0.889 mm button travel, 25.92 rad/s). Releasing to
 2.8 N turns it off. Maximum four-second drift is 0.80 mm; opening produces a

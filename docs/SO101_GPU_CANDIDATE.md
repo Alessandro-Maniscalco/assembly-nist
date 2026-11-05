@@ -62,3 +62,55 @@ Use `--case zero --worlds 16|64|256` for a full scene; `--case native_collection
 The runner contains a 60 s first-synchronized-step watchdog and a background resource guard that terminates only its own scratch process above 8 GiB total device memory or 12 GiB estimated host use. Earlier raw runs used external timeouts; the mixed compile was manually stopped. GPU benchmark peak recorded memory was 3.13 GB, and the mixed compile approached 11.2 GiB host use. Raw JSON, XML, traces and logs are under `artifacts_local/gpu_menagerie_candidate/`.
 
 Before staging a distinct training run: resolve the small-part jaw fidelity gap; verify target part grasp, contact, placement and nominal task success; qualify full-horizon continuation/reset behavior and environment observations/rewards; then measure complete collection plus learner throughput. The source PPO, SimBa and SGS algorithms remain unchanged.
+
+## Follow-up: measured bottleneck and fine-jaw alternative
+
+`scripts/so101_gpu_profile.py` profiles cached kernels without changing production. On the 64-world, five-task fixture, SDF narrowphase accounts for **92.88%** of measured CUDA kernel time; solver line search is **0.97%** and Cholesky **0.78%**. Reducing solver effort would not address the dominant cost. Timings are CUDA events over eight uncaptured steps; the separate captured benchmarks below exclude profiling and Python launch overhead.
+
+The historical 235 s first-step interruption was **not reproduced**: current fine-jaw HOME probes at line-search 100 complete their first synchronized step in 2.08 s for one world and 2.37 s for sixteen worlds, including cached module loading. Subsequent SDF kernels take about 28 ms/step. The old log already showed cached modules, so compilation was not established as its cause.
+
+Installed MJWarp's mesh–SDF distance query scans every mesh triangle repeatedly during gradient descent. HOME admits left geom 31 / 37 and right geom 68 / 74: `wrist_roll_pitch_so101_v2` (53,994 faces) against the moving-jaw SDF. One isolated left pair costs 25.39 ms at one world. Native [MuJoCo 3.17 mesh–SDF collision](https://github.com/google-deepmind/mujoco/blob/3.17.0/src/engine/engine_collision_sdf.c#L970) traverses the original mesh faces through a BVH; replacing those faces with a convex hull would change this contact geometry.
+
+A conservative geometric proof supports excluding each wrist body against its own moving-jaw body. The proof encloses every grid cell capable of negative trilinear distance, verifies positive boundary samples, and maximizes the jaw's axial coordinate analytically across the entire gripper angle interval. Wrist roll preserves that coordinate. Both sides have at least **4.487 mm separation** over legal limits, and **1.636 mm** with an additional ±0.05 rad of gripper motion. This covers both wrist collision meshes, including the servo. The proof is specific to the recorded model/grid and legal motion; it does not authorize arbitrary self-collision exclusions.
+
+Native HOME has no contacts between these bodies. Before exclusion, the GPU produces false contacts reaching **2.94 mm penetration** despite the separating bound. Scratch XML adds only the two proved body exclusions; all fine jaw grids, target meshes, tool, controls and other collision pairs remain. The false contacts disappear. Native original/excluded continuations are bit-identical in qpos/qvel across 80 steps for all **53 starts** tested: five independent task starts plus 48 held motor starts, with zero warnings. Other poses that admit mesh–SDF pairs still need independent contact parity.
+
+| Fine-jaw scratch fixture, FP64 | Worlds | Captured physics transitions/s |
+| --- | ---: | ---: |
+| Five independent task starts, cyclic | 64 | 37.35 |
+| 48 near-held motor starts, cyclic | 64 | 54.57 |
+
+Both four-control benchmarks remain finite with zero overflow flags. Peak recorded probe RSS is 3.55 GB and total device memory 1.85 GB; native training continues concurrently. These are fixed-control physics measurements, not complete environment/PPO throughput or successful assembly. The fine geometry avoids the Menagerie fidelity compromise, but the five-task rate offers no compelling production migration benefit.
+
+After the exclusions, neither fixture has a mesh–SDF broadphase pair. A separate per-pair diagnostic measures table/base at 1.84 ms for 64 worlds, female/male at 1.42 ms for 25 worlds, and several male-thread/part candidate pairs at 1.08–1.41 ms. Some candidates produce zero final contacts but still incur SDF search. These timings isolate pairs and must not be added as an exact decomposition of the simultaneous kernel. Remaining work is target/thread SDF search and arithmetic, not high-face helper meshes or solver tuning.
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m scripts.so101_gpu_profile \
+  --geometry fine --mode separation --out artifacts_local/gpu_profile/separation
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv/bin/python -m scripts.so101_gpu_profile \
+  --geometry fine --exclude-separated --worlds 64 --bank-dir data/so101/banks_near_v1 \
+  --benchmark-controls 4 --out artifacts_local/gpu_profile/fine_benchmark
+```
+
+Use `--bank-selection motor-near` for held starts or `--mode sdf-pairs` for isolated pair timing. Default guard limits are 4.5 GiB process RSS, 2 GiB minimum available host memory, 8 GiB total GPU memory and 90 s wall time. Evidence is under `artifacts_local/gpu_profile/`; no production scene, bank or learner was changed.
+
+A final bounded mixed-precision attempt reused the already validated point-query code unchanged, with the fine jaws and proved exclusions. The explicitly raised limits were 5.5 GiB RSS and 180 s. Compilation crossed the RSS threshold between one-second watchdog samples: the terminating sample was **6.02 GiB RSS**, **2.10 GiB host memory available**, and **1.80 GB total device memory**. The guard terminated only that probe (exit 70), before a completed physics step. `fine_mixed64/profile.json` preserves the failure. No mixed-precision throughput or mechanical parity is available; further compilation and a GPU environment port were stopped. The native learner continued.
+
+The standalone mixed query module defaults to backward code generation, but that does not explain this failure: the compiled collision module already disables it. Its retained 503,880-byte CUDA source contains one forward narrowphase kernel, no backward kernel and no query kernel; the cached FP64 counterpart is 504,038 bytes. Warp propagates backward use from the calling kernels. `backward_codegen_audit.json` and `mixed_failed_codegen.cu` preserve that check; only this probe's interrupted temporary cache directory was removed. No repeat compilation was attempted.
+
+### Mixed precision after freeing host memory
+
+A separate quiet compilation window completed the unchanged mixed SDF collision
+kernel in 86.18 seconds after the prior learner and CPU probes had checkpointed
+and stopped. The guard allowed at most 9 GiB process RSS, required 2 GiB available
+host memory, capped total GPU memory at 8 GiB, and limited the attempt to 240 s.
+Post-compilation RSS was about 3.74 GiB; the measured run used at most 1.35 GiB GPU
+memory. The earlier under-load memory failure remains preserved.
+
+With fine jaw SDFs and the proven wrist/jaw exclusions, the 64-world five-task
+fixture measured **102.07 raw physics transitions/s** over one captured control
+block, finite with zero overflow. SDF collision still occupied 84.6% of kernel
+time. This short result motivates further qualification; it does not establish
+end-to-end learner speed or mechanical equivalence. The native v2 learner was
+then started while actual contact/control/reset checks proceed separately.
+Evidence: `artifacts_local/gpu_profile/quiet_mixed/profile.json`.

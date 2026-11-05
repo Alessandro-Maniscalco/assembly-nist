@@ -42,7 +42,7 @@ def load_plugin():
     mujoco.mj_loadPluginLibrary(str(ROOT / 'plugin/build/libso101_driver.so'))
 
 
-def build_xml(assembled=False):
+def build_xml(assembled=False, contact_monitor=False):
     parts = metadata()
     target = origins(parts)
     root = ET.Element('mujoco', model='dual_so101_hiwonder')
@@ -154,9 +154,12 @@ def build_xml(assembled=False):
                      friction='.2 .001 .00001',solref='.001 1',solimp='.99 .999 .00005')
             add(geom,'plugin',instance='female')
     add_driver(world, ext, contact)
+    if contact_monitor:
+        sensors=add(root,'sensor')
+        add(sensors,'contact',name='min_contact_distance',data='dist',num='1',reduce='mindist')
     return ET.tostring(root, encoding='unicode')
 
 
-def model(assembled=False):
+def model(assembled=False, contact_monitor=False):
     load_plugin()
-    return mujoco.MjModel.from_xml_string(build_xml(assembled))
+    return mujoco.MjModel.from_xml_string(build_xml(assembled,contact_monitor))
